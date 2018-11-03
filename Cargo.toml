@@ -1,0 +1,28 @@
+[package]
+name = "hashgraph"
+version = "0.1.0"
+authors = ["champii <contact@champii>"]
+
+
+[lib]
+name = "hashgraph"
+path = "src/hashgraph/mod.rs"
+
+[[bin]]
+name = "hashgraph"
+path = "src/main.rs"
+
+[dependencies]
+ring="0.13.2"
+untrusted="0.6.2"
+clap="2.32.0"
+serde="1.0"
+serde_derive="1.0"
+serde_bytes="0.10.4"
+bincode="1.0.1"
+lazy_static="1.1.0"
+log = "0.4"
+env_logger = "0.5.12"
+rand = "0.3"
+
+rsrpc = { path = "../rsrpc/" }
