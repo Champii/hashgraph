@@ -1,9 +1,6 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::event::{Event, EventCreator, EventHash};
 use super::events::{Events, EventsDiff};
@@ -298,7 +295,7 @@ impl Hashgraph {
     pub fn set_round(&mut self, e: Event) -> u64 {
         let is_witness = self.is_witness(e.clone());
 
-        let mut last_round = self.get_parent_round(e.clone());
+        let last_round = self.get_parent_round(e.clone());
         let mut last_round_id = last_round.read().unwrap().id;
 
         if !e.is_root() && is_witness {
@@ -469,7 +466,7 @@ impl Hashgraph {
             })
             .collect::<Vec<(Event, Arc<RwLock<Round>>, Arc<RwLock<RoundEvent>>)>>();
 
-        received.sort_by(|(e1, r1, re1), (e2, r2, re2)| {
+        received.sort_by(|(_, _, re1), (_, _, re2)| {
             re1.read()
                 .unwrap()
                 .received
@@ -487,7 +484,7 @@ impl Hashgraph {
             })
             .collect::<Vec<(Event, u64)>>();
 
-        timestamped.sort_by(|(e1, t1), (e2, t2)| t1.cmp(t2));
+        timestamped.sort_by(|(_, t1), (_, t2)| t1.cmp(t2));
 
         let txs = timestamped
             .iter()
@@ -497,7 +494,7 @@ impl Hashgraph {
 
         if txs.len() > 0 {
             for tx in txs.clone() {
-                self.tx_out.lock().unwrap().send(tx);
+                self.tx_out.lock().unwrap().send(tx).unwrap();
             }
 
             self.transactions.extend(txs);
@@ -561,13 +558,15 @@ impl Hashgraph {
 
 mod tests {
     use std::collections::HashMap;
-    use std::sync::mpsc::{channel, Receiver, Sender};
+    use std::sync::mpsc::{channel, Receiver};
     use std::sync::{Arc, Mutex, RwLock};
 
     use super::Event;
+    #[allow(unused_imports)]
     use super::FamousType;
     use super::Hashgraph;
     use super::Peers;
+    #[allow(unused_imports)]
     use peer::Peer;
 
     // new_hash, other_parent
@@ -577,9 +576,9 @@ mod tests {
     fn insert_events(
         to_insert: Vec<EventInsert>,
         peers: Peers,
-    ) -> (Hashgraph, HashMap<String, Event>) {
+    ) -> (Hashgraph, HashMap<String, Event>, Receiver<Vec<u8>>) {
         let mut indexes = HashMap::new();
-        let (tx_out, tx_out_receiver) = channel();
+        let (tx_out, tx_out_recv) = channel();
 
         let mut hg = Hashgraph::new(Arc::new(RwLock::new(peers)), Arc::new(Mutex::new(tx_out)));
 
@@ -612,7 +611,7 @@ mod tests {
             hg.insert_event(e)
         }
 
-        (hg, indexes)
+        (hg, indexes, tx_out_recv)
     }
 
     /*
@@ -643,7 +642,7 @@ mod tests {
             ("b1".to_string(), "a1".to_string(), "".to_string()),
         ];
 
-        let (mut hg, indexes) = insert_events(to_insert, peers);
+        let (hg, indexes, _) = insert_events(to_insert, peers);
 
         // ancestor
         let assert_ancestor = |hash1: &str, hash2: &str, res: bool| {
@@ -833,7 +832,7 @@ mod tests {
             ("b4".to_string(), "".to_string(), "".to_string()),
         ];
 
-        let (hg, indexes) = insert_events(to_insert, peers);
+        let (hg, indexes, _) = insert_events(to_insert, peers);
 
         let assert_witness = |hash: &str, res: bool| {
             assert_eq!(
@@ -1016,7 +1015,7 @@ mod tests {
             ("c9".to_string(), "b9".to_string(), "".to_string()),
         ];
 
-        let (hg, indexes) = insert_events(to_insert, peers);
+        let (hg, indexes, _) = insert_events(to_insert, peers);
 
         let assert_round = |hash: &str, res: u64| {
             assert_eq!(
@@ -1028,7 +1027,7 @@ mod tests {
             );
         };
 
-        let assert_famous = |r: u64, hash: &str, res: FamousType| {
+        let assert_famous = |r: u64, hash: &str, res: super::FamousType| {
             let round = hg.rounds[(r - 1) as usize].read().unwrap();
 
             assert_eq!(
@@ -1046,16 +1045,6 @@ mod tests {
         let assert_see = |hash1: &str, hash2: &str, res: bool| {
             assert_eq!(
                 hg.clone().see(
-                    indexes.get(hash1).unwrap().clone(),
-                    indexes.get(hash2).unwrap().clone()
-                ),
-                res
-            );
-        };
-
-        let assert_strongly_see = |hash1: &str, hash2: &str, res: bool| {
-            assert_eq!(
-                hg.clone().strongly_see(
                     indexes.get(hash1).unwrap().clone(),
                     indexes.get(hash2).unwrap().clone()
                 ),

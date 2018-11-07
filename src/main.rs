@@ -6,10 +6,9 @@
   futures_api
 )]
 
-#[macro_use]
-extern crate log;
 extern crate clap;
 extern crate hashgraph;
+extern crate log;
 
 mod args;
 
@@ -26,7 +25,7 @@ fn main() {
 
   let mut node = Node::new(key, config);
 
-  let (tx_in, tx_out) = node.run();
+  let (_, tx_out) = node.run();
 
   loop {
     let res = tx_out.recv();

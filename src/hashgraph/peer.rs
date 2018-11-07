@@ -1,7 +1,6 @@
 use std::fmt::{Display, Formatter, Result};
 use std::net::SocketAddr;
 
-use super::event::Event;
 use super::key::Key;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

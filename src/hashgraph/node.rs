@@ -104,9 +104,8 @@ impl Node {
 
             let known = hg.read().unwrap().events.known_events();
 
-            client
-                .pull(known)
-                .and_then(|events| {
+            match client.pull(known) {
+                Ok(events) => {
                     let res = events.unwrap();
                     trace!("Events from pull {:?}", res.clone());
 
@@ -118,18 +117,10 @@ impl Node {
 
                     trace!("Events to push {:?}", events_diff.clone());
 
-                    let res = client.push(events_diff);
-
-                    Ok(res)
-                })
-                .or_else(|err| {
-                    error!("{:?}", err);
-
-                    Err(err)
-                });
-            // .unwrap() // !!!!
-            // .unwrap() // !!!!
-            // .unwrap(); // !!!!
+                    client.push(events_diff).unwrap().unwrap();
+                }
+                Err(err) => error!("{:?}", err),
+            };
         }
     }
 }
