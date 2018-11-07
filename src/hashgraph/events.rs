@@ -95,15 +95,15 @@ impl Events {
         EventsDiff { known, diff: res }
     }
 
-    pub fn merge_events(&mut self, new_events: EventsDiff) -> bool {
-        for (_, events) in new_events.diff {
-            for event in events {
-                self.insert_event(event);
-            }
-        }
+    // pub fn merge_events(&mut self, new_events: EventsDiff) -> bool {
+    //     for (_, events) in new_events.diff {
+    //         for event in events {
+    //             self.insert_event(event);
+    //         }
+    //     }
 
-        true
-    }
+    //     true
+    // }
 
     pub fn get_last_event_of(&self, creator: EventCreator) -> Option<Event> {
         self.by_creator

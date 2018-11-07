@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -7,32 +9,46 @@ use super::events::{Events, EventsDiff};
 use super::peers::Peers;
 use super::round::{FamousType, Round, RoundEvent};
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Hashgraph {
-    pub peers: Arc<Mutex<Peers>>,
+    pub peers: Arc<RwLock<Peers>>,
     pub events: Events,
     pub rounds: Vec<Arc<RwLock<Round>>>,
-    pub tx_channel: Sender<Vec<u8>>,
+    pub tx_out: Mutex<Sender<Vec<u8>>>,
     pub transactions: Vec<Vec<u8>>,
 }
 
 impl Default for Hashgraph {
     fn default() -> Hashgraph {
-        let (tx_channel, _) = channel();
+        let (tx_out, _) = channel();
 
-        Hashgraph::new(Arc::new(Mutex::new(Peers::new())), tx_channel)
+        Hashgraph::new(Arc::new(RwLock::new(Peers::new())), Mutex::new(tx_out))
     }
 }
 
 impl Hashgraph {
-    pub fn new(peers: Arc<Mutex<Peers>>, tx_channel: Sender<Vec<u8>>) -> Hashgraph {
+    pub fn new(peers: Arc<RwLock<Peers>>, tx_out: Mutex<Sender<Vec<u8>>>) -> Hashgraph {
         Hashgraph {
             peers,
             events: Events::new(),
             rounds: vec![Arc::new(RwLock::new(Round::new(1)))], // rounds start at 1
             transactions: vec![],
-            tx_channel,
+            tx_out,
         }
+    }
+
+    pub fn add_transaction(&mut self, tx: Vec<u8>) {
+        let self_id = self.peers.read().unwrap().self_id;
+
+        let last_own_event = self.events.get_last_event_of(self_id).unwrap();
+
+        self.insert_event(Event::new(
+            last_own_event.id + 1,
+            self_id,
+            last_own_event.hash,
+            0,
+            vec![tx],
+        ));
     }
 
     pub fn insert_event(&mut self, event: Event) {
@@ -52,7 +68,12 @@ impl Hashgraph {
         peer_id: u64,
         other_events: EventsDiff,
     ) -> EventsDiff {
-        self.events.merge_events(other_events.clone());
+        for (_, events) in other_events.diff {
+            for event in events {
+                self.insert_event(event);
+            }
+        }
+        // self.events.merge_events(other_events.clone());
 
         let last_own_event = self.events.get_last_event_of(self_id).unwrap();
 
@@ -131,7 +152,7 @@ impl Hashgraph {
     }
 
     pub fn strongly_see(&self, e: Event, possible_see: Event) -> bool {
-        let super_majority = self.peers.lock().unwrap().super_majority;
+        let super_majority = self.peers.read().unwrap().super_majority;
 
         let res = self.strongly_see_with_path(e, possible_see);
 
@@ -195,7 +216,7 @@ impl Hashgraph {
             }
         }
 
-        ss_count >= self.peers.lock().unwrap().super_majority
+        ss_count >= self.peers.read().unwrap().super_majority
     }
 
     pub fn set_round(&mut self, e: Event) -> u64 {
@@ -277,7 +298,7 @@ impl Hashgraph {
 
         for (hash, votes) in vote_results.iter() {
             let prev_prev_round = self.rounds[e.round as usize - 3].read().unwrap();
-            if votes.clone() >= self.peers.lock().unwrap().super_majority {
+            if votes.clone() >= self.peers.read().unwrap().super_majority {
                 (*(*prev_prev_round)
                     .events
                     .get(hash)
@@ -399,6 +420,10 @@ impl Hashgraph {
             .concat();
 
         if txs.len() > 0 {
+            for tx in txs.clone() {
+                self.tx_out.lock().unwrap().send(tx);
+            }
+
             self.transactions.extend(txs);
         }
     }
@@ -421,7 +446,7 @@ impl Hashgraph {
 
         timestamps.sort();
 
-        timestamps[(timestamps.len() / 2) + 1]
+        timestamps[(timestamps.len() / 2)]
     }
 
     pub fn get_first_decendant(&self, event: Event, possible_decendant: Event) -> Option<Event> {
@@ -461,13 +486,13 @@ impl Hashgraph {
 mod tests {
     use std::collections::HashMap;
     use std::sync::mpsc::{channel, Receiver, Sender};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, RwLock};
 
-    use super::super::Peer;
     use super::Event;
     use super::FamousType;
     use super::Hashgraph;
     use super::Peers;
+    use peer::Peer;
 
     // new_hash, other_parent
     type EventInsert = (String, String, String);
@@ -478,9 +503,9 @@ mod tests {
         peers: Peers,
     ) -> (Hashgraph, HashMap<String, Event>) {
         let mut indexes = HashMap::new();
-        let (sender, receiver) = channel();
+        let (tx_out, tx_out_receiver) = channel();
 
-        let mut hg = Hashgraph::new(Arc::new(Mutex::new(peers)), sender);
+        let mut hg = Hashgraph::new(Arc::new(RwLock::new(peers)), Mutex::new(tx_out));
 
         for event in to_insert.iter() {
             let event_hash_bytes = event.0.as_bytes();

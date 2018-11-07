@@ -26,10 +26,10 @@ fn main() {
 
   let mut node = Node::new(key, config);
 
-  let receiver = node.run();
+  let (tx_in, tx_out) = node.run();
 
   loop {
-    let res = receiver.recv();
+    let res = tx_out.recv();
 
     println!("RESULT {:?}", res);
   }
