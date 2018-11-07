@@ -48,7 +48,7 @@ impl Node {
         thread::spawn(move || {
             let hg = Arc::new(RwLock::new(Hashgraph::new(
                 local_self.peers.clone(),
-                Mutex::new(tx_out),
+                Arc::new(Mutex::new(tx_out)),
             )));
 
             local_self.peers.write().unwrap().add_self(Peer::new(
@@ -77,10 +77,8 @@ impl Node {
             let hg2 = hg.clone();
             thread::spawn(move || loop {
                 let tx = tx_in_receiver.recv();
-                error!("HEUUUUU");
 
                 hg2.write().unwrap().add_transaction(tx.unwrap());
-                error!("HEUUUUU2");
             });
 
             local_self.gossip(hg);

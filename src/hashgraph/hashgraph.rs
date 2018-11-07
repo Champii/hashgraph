@@ -3,37 +3,50 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::event::{Event, EventCreator, EventHash};
 use super::events::{Events, EventsDiff};
 use super::peers::Peers;
 use super::round::{FamousType, Round, RoundEvent};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Hashgraph {
     pub peers: Arc<RwLock<Peers>>,
     pub events: Events,
     pub rounds: Vec<Arc<RwLock<Round>>>,
-    pub tx_out: Mutex<Sender<Vec<u8>>>,
+    pub tx_out: Arc<Mutex<Sender<Vec<u8>>>>,
     pub transactions: Vec<Vec<u8>>,
+
+    ancestor_cache: HashMap<(EventHash, EventHash), bool>,
+    self_ancestor_cache: HashMap<(EventHash, EventHash), bool>,
+    ss_cache: HashMap<(EventHash, EventHash), bool>,
+    ss_path_cache: HashMap<(EventHash, EventHash), (bool, Vec<EventCreator>)>,
 }
 
 impl Default for Hashgraph {
     fn default() -> Hashgraph {
         let (tx_out, _) = channel();
 
-        Hashgraph::new(Arc::new(RwLock::new(Peers::new())), Mutex::new(tx_out))
+        Hashgraph::new(
+            Arc::new(RwLock::new(Peers::new())),
+            Arc::new(Mutex::new(tx_out)),
+        )
     }
 }
 
 impl Hashgraph {
-    pub fn new(peers: Arc<RwLock<Peers>>, tx_out: Mutex<Sender<Vec<u8>>>) -> Hashgraph {
+    pub fn new(peers: Arc<RwLock<Peers>>, tx_out: Arc<Mutex<Sender<Vec<u8>>>>) -> Hashgraph {
         Hashgraph {
             peers,
             events: Events::new(),
             rounds: vec![Arc::new(RwLock::new(Round::new(1)))], // rounds start at 1
             transactions: vec![],
             tx_out,
+            ancestor_cache: HashMap::new(),
+            self_ancestor_cache: HashMap::new(),
+            ss_cache: HashMap::new(),
+            ss_path_cache: HashMap::new(),
         }
     }
 
@@ -59,6 +72,7 @@ impl Hashgraph {
         e.round = round_id;
 
         self.events.insert_event(e.clone());
+
         self.process_fame(e.clone());
     }
 
@@ -73,7 +87,6 @@ impl Hashgraph {
                 self.insert_event(event);
             }
         }
-        // self.events.merge_events(other_events.clone());
 
         let last_own_event = self.events.get_last_event_of(self_id).unwrap();
 
@@ -90,7 +103,21 @@ impl Hashgraph {
         self.events.events_diff(other_events.known)
     }
 
-    pub fn is_ancestor(&self, possible_ancestor: Event, e: Event) -> bool {
+    pub fn is_ancestor(&mut self, possible_ancestor: Event, e: Event) -> bool {
+        let hash = (possible_ancestor.hash, e.hash);
+
+        if let Some(res) = self.ancestor_cache.get(&hash) {
+            return res.clone();
+        }
+
+        let res = self._is_ancestor(possible_ancestor, e);
+
+        self.ancestor_cache.insert(hash, res);
+
+        res
+    }
+
+    pub fn _is_ancestor(&mut self, possible_ancestor: Event, e: Event) -> bool {
         if possible_ancestor.hash == e.hash {
             return true;
         }
@@ -127,7 +154,21 @@ impl Hashgraph {
         false
     }
 
-    pub fn is_self_ancestor(&self, possible_ancestor: Event, e: Event) -> bool {
+    pub fn is_self_ancestor(&mut self, possible_ancestor: Event, e: Event) -> bool {
+        let hash = (possible_ancestor.hash, e.hash);
+
+        if let Some(res) = self.self_ancestor_cache.get(&hash) {
+            return res.clone();
+        }
+
+        let res = self._is_self_ancestor(possible_ancestor, e);
+
+        self.self_ancestor_cache.insert(hash, res);
+
+        res
+    }
+
+    pub fn _is_self_ancestor(&mut self, possible_ancestor: Event, e: Event) -> bool {
         let self_parent = self.events.get_event(e.self_parent);
 
         if self_parent.is_none() {
@@ -147,11 +188,25 @@ impl Hashgraph {
         false
     }
 
-    pub fn see(&self, e: Event, possible_see: Event) -> bool {
+    pub fn see(&mut self, e: Event, possible_see: Event) -> bool {
         self.is_ancestor(possible_see, e)
     }
 
-    pub fn strongly_see(&self, e: Event, possible_see: Event) -> bool {
+    pub fn strongly_see(&mut self, e: Event, possible_see: Event) -> bool {
+        let hash = (e.hash, possible_see.hash);
+
+        if let Some(res) = self.ss_cache.get(&hash) {
+            return res.clone();
+        }
+
+        let res = self._strongly_see(e, possible_see);
+
+        self.ss_cache.insert(hash, res);
+
+        res
+    }
+
+    pub fn _strongly_see(&mut self, e: Event, possible_see: Event) -> bool {
         let super_majority = self.peers.read().unwrap().super_majority;
 
         let res = self.strongly_see_with_path(e, possible_see);
@@ -159,7 +214,28 @@ impl Hashgraph {
         res.0 == true && res.1.len() >= super_majority as usize
     }
 
-    fn strongly_see_with_path(&self, e: Event, possible_see: Event) -> (bool, Vec<EventCreator>) {
+    pub fn strongly_see_with_path(
+        &mut self,
+        e: Event,
+        possible_see: Event,
+    ) -> (bool, Vec<EventCreator>) {
+        let hash = (e.hash, possible_see.hash);
+
+        if let Some(res) = self.ss_path_cache.get(&hash) {
+            return res.clone();
+        }
+
+        let res = self._strongly_see_with_path(e, possible_see);
+
+        self.ss_path_cache.insert(hash, res.clone());
+
+        res
+    }
+    fn _strongly_see_with_path(
+        &mut self,
+        e: Event,
+        possible_see: Event,
+    ) -> (bool, Vec<EventCreator>) {
         let self_parent = self.events.get_event(e.self_parent);
         let other_parent = self.events.get_event(e.other_parent);
 
@@ -199,7 +275,7 @@ impl Hashgraph {
         (false, vec![])
     }
 
-    pub fn is_witness(&self, e: Event) -> bool {
+    pub fn is_witness(&mut self, e: Event) -> bool {
         if e.is_root() {
             return true;
         }
@@ -323,10 +399,10 @@ impl Hashgraph {
     pub fn decide_round_received(&mut self) {
         let mut decided_events = vec![];
 
-        for (_, undecided) in &self.events.undecided {
+        for (_, undecided) in self.events.undecided.clone() {
             // start at r+1
             for i in undecided.round as usize..self.rounds.len() {
-                let round = &self.rounds[i].read().unwrap();
+                let round = &self.rounds[i].read().unwrap().clone();
 
                 let witness_iter = round.witnesses.iter();
 
@@ -505,7 +581,7 @@ mod tests {
         let mut indexes = HashMap::new();
         let (tx_out, tx_out_receiver) = channel();
 
-        let mut hg = Hashgraph::new(Arc::new(RwLock::new(peers)), Mutex::new(tx_out));
+        let mut hg = Hashgraph::new(Arc::new(RwLock::new(peers)), Arc::new(Mutex::new(tx_out)));
 
         for event in to_insert.iter() {
             let event_hash_bytes = event.0.as_bytes();
@@ -567,12 +643,12 @@ mod tests {
             ("b1".to_string(), "a1".to_string(), "".to_string()),
         ];
 
-        let (hg, indexes) = insert_events(to_insert, peers);
+        let (mut hg, indexes) = insert_events(to_insert, peers);
 
         // ancestor
         let assert_ancestor = |hash1: &str, hash2: &str, res: bool| {
             assert_eq!(
-                hg.is_ancestor(
+                hg.clone().is_ancestor(
                     indexes.get(hash1).unwrap().clone(),
                     indexes.get(hash2).unwrap().clone()
                 ),
@@ -581,7 +657,7 @@ mod tests {
         };
         let assert_self_ancestor = |hash1: &str, hash2: &str, res: bool| {
             assert_eq!(
-                hg.is_self_ancestor(
+                hg.clone().is_self_ancestor(
                     indexes.get(hash1).unwrap().clone(),
                     indexes.get(hash2).unwrap().clone()
                 ),
@@ -591,7 +667,7 @@ mod tests {
 
         let assert_see = |hash1: &str, hash2: &str, res: bool| {
             assert_eq!(
-                hg.see(
+                hg.clone().see(
                     indexes.get(hash1).unwrap().clone(),
                     indexes.get(hash2).unwrap().clone()
                 ),
@@ -601,7 +677,7 @@ mod tests {
 
         let assert_strongly_see = |hash1: &str, hash2: &str, res: bool| {
             assert_eq!(
-                hg.strongly_see(
+                hg.clone().strongly_see(
                     indexes.get(hash1).unwrap().clone(),
                     indexes.get(hash2).unwrap().clone()
                 ),
@@ -610,12 +686,16 @@ mod tests {
         };
 
         let assert_witness = |hash: &str, res: bool| {
-            assert_eq!(hg.is_witness(indexes.get(hash).unwrap().clone()), res);
+            assert_eq!(
+                hg.clone().is_witness(indexes.get(hash).unwrap().clone()),
+                res
+            );
         };
 
         let assert_round = |hash: &str, res: u64| {
             assert_eq!(
-                hg.events
+                hg.clone()
+                    .events
                     .get_event(indexes.get(hash).unwrap().clone().hash)
                     .unwrap()
                     .round,
@@ -756,12 +836,15 @@ mod tests {
         let (hg, indexes) = insert_events(to_insert, peers);
 
         let assert_witness = |hash: &str, res: bool| {
-            assert_eq!(hg.is_witness(indexes.get(hash).unwrap().clone()), res);
+            assert_eq!(
+                hg.clone().is_witness(indexes.get(hash).unwrap().clone()),
+                res
+            );
         };
 
         let assert_strongly_see = |hash1: &str, hash2: &str, res: bool| {
             assert_eq!(
-                hg.strongly_see(
+                hg.clone().strongly_see(
                     indexes.get(hash1).unwrap().clone(),
                     indexes.get(hash2).unwrap().clone()
                 ),
@@ -962,7 +1045,7 @@ mod tests {
 
         let assert_see = |hash1: &str, hash2: &str, res: bool| {
             assert_eq!(
-                hg.see(
+                hg.clone().see(
                     indexes.get(hash1).unwrap().clone(),
                     indexes.get(hash2).unwrap().clone()
                 ),
@@ -972,7 +1055,7 @@ mod tests {
 
         let assert_strongly_see = |hash1: &str, hash2: &str, res: bool| {
             assert_eq!(
-                hg.strongly_see(
+                hg.clone().strongly_see(
                     indexes.get(hash1).unwrap().clone(),
                     indexes.get(hash2).unwrap().clone()
                 ),
