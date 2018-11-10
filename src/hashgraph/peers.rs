@@ -57,6 +57,13 @@ impl Peers {
         None
     }
 
+    pub fn get_self(self) -> Option<Peer> {
+        match self.peers.get(&self.self_id) {
+            Some(peer) => Some(peer.clone()),
+            None => None,
+        }
+    }
+
     pub fn get_random(self) -> Option<Peer> {
         if self.peers.len() <= 1 {
             warn!("Waiting for peers...");
@@ -79,5 +86,15 @@ impl Peers {
         res.remove(&self.self_id);
 
         res
+    }
+
+    pub fn len(&self) -> usize {
+        self.peers.len()
+    }
+
+    pub fn merge(&mut self, peers: Peers) {
+        for (_, peer) in peers.peers {
+            self.add(peer);
+        }
     }
 }

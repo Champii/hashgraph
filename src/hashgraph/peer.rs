@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 
 use super::key::Key;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Hash, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Peer {
     pub id: u64,
     pub address: SocketAddr,

@@ -23,9 +23,11 @@ fn main() {
 
   let key = Key::new_generate().unwrap();
 
-  let mut node = Node::new(key, config);
+  let mut node = Node::new(key.clone(), config);
 
-  let (_, tx_out) = node.run();
+  let tx_out = node.run();
+
+  node.add_tx(key.get_pub());
 
   loop {
     let res = tx_out.recv();

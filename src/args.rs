@@ -25,14 +25,14 @@ pub fn parse_config() -> NodeConfig {
         .help("Listening address (127.0.0.1:3000)")
         .takes_value(true),
     )
-    // .arg(
-    //   Arg::with_name("connect")
-    //     .short("c")
-    //     .long("connect")
-    //     .value_name("IpAddr")
-    //     .help("Connect to bootstrap node")
-    //     .takes_value(true),
-    // )
+    .arg(
+      Arg::with_name("connect")
+        .short("c")
+        .long("connect")
+        .value_name("IpAddr")
+        .help("Connect to bootstrap node")
+        .takes_value(true),
+    )
     .arg(
       Arg::with_name("verbose")
         .short("v")
@@ -43,12 +43,12 @@ pub fn parse_config() -> NodeConfig {
     )
     .get_matches();
 
-  // let connect_addr_str = matches.value_of("connect").unwrap_or("");
-  // let connect_addr = if connect_addr_str == "" {
-  //   None
-  // } else {
-  //   Some(to_socket_addr(connect_addr_str))
-  // };
+  let connect_addr_str = matches.value_of("connect").unwrap_or("");
+  let connect_addr = if connect_addr_str == "" {
+    None
+  } else {
+    Some(to_socket_addr(connect_addr_str))
+  };
 
   let listen_addr_str = matches.value_of("listen").unwrap_or("127.0.0.1:3000");
   let listen_addr = to_socket_addr(listen_addr_str);
@@ -61,7 +61,7 @@ pub fn parse_config() -> NodeConfig {
 
   NodeConfig {
     listen_addr,
-    // connect_addr,
+    connect_addr,
     verbose,
   }
 }

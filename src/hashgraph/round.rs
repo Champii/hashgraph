@@ -10,7 +10,7 @@ pub enum FamousType {
     Undefined,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoundEvent {
     pub hash: u64,
     pub witness: bool,

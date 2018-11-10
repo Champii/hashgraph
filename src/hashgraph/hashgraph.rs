@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::SystemTime;
 
 use super::event::{Event, EventCreator, EventHash};
 use super::events::{Events, EventsDiff};
+use super::internal_txs::{PeerTx, PeerTxType};
 use super::peers::Peers;
 use super::round::{FamousType, Round, RoundEvent};
 
@@ -14,8 +16,10 @@ pub struct Hashgraph {
     pub rounds: Vec<Arc<RwLock<Round>>>,
     pub tx_out: Arc<Mutex<Sender<Vec<u8>>>>,
     pub transactions: Vec<Vec<u8>>,
+    pub internal_transactions: Vec<PeerTx>,
 
     ancestor_cache: HashMap<(EventHash, EventHash), bool>,
+    first_decendant_cache: HashMap<(EventHash, EventHash), EventHash>,
     self_ancestor_cache: HashMap<(EventHash, EventHash), bool>,
     ss_cache: HashMap<(EventHash, EventHash), bool>,
     ss_path_cache: HashMap<(EventHash, EventHash), (bool, Vec<EventCreator>)>,
@@ -39,15 +43,26 @@ impl Hashgraph {
             events: Events::new(),
             rounds: vec![Arc::new(RwLock::new(Round::new(1)))], // rounds start at 1
             transactions: vec![],
+            internal_transactions: vec![],
             tx_out,
             ancestor_cache: HashMap::new(),
+            first_decendant_cache: HashMap::new(),
             self_ancestor_cache: HashMap::new(),
             ss_cache: HashMap::new(),
             ss_path_cache: HashMap::new(),
         }
     }
 
-    pub fn add_transaction(&mut self, tx: Vec<u8>) {
+    pub fn add_self_event(&mut self, tx: Vec<u8>, _peer_txs: Vec<PeerTx>) {
+        let mut peer_txs = _peer_txs.clone();
+
+        // if no peers and a peer is added, add the first without consensus
+        if peer_txs.len() > 0 && self.peers.read().unwrap().len() == 1 {
+            self.peers.write().unwrap().add(peer_txs[0].clone().peer);
+
+            peer_txs = peer_txs[1..].to_vec();
+        }
+
         let self_id = self.peers.read().unwrap().self_id;
 
         let last_own_event = self.events.get_last_event_of(self_id).unwrap();
@@ -58,6 +73,7 @@ impl Hashgraph {
             last_own_event.hash,
             0,
             vec![tx],
+            peer_txs,
         ));
     }
 
@@ -79,7 +95,13 @@ impl Hashgraph {
         peer_id: u64,
         other_events: EventsDiff,
     ) -> EventsDiff {
-        for (_, events) in other_events.diff {
+        let now = SystemTime::now();
+
+        if other_events.diff.len() == 0 {
+            return EventsDiff::default();
+        }
+
+        for (hash, events) in other_events.diff {
             for event in events {
                 self.insert_event(event);
             }
@@ -87,7 +109,15 @@ impl Hashgraph {
 
         let last_own_event = self.events.get_last_event_of(self_id).unwrap();
 
-        let last_other_event = self.events.get_last_event_of(peer_id).unwrap();
+        let last_other_event = self.events.get_last_event_of(peer_id);
+
+        if last_other_event.is_none() {
+            error!("Merge Events: Unknown peer");
+
+            return EventsDiff::default();
+        }
+
+        let last_other_event = last_other_event.unwrap();
 
         self.insert_event(Event::new(
             last_own_event.id + 1,
@@ -95,9 +125,14 @@ impl Hashgraph {
             last_own_event.hash,
             last_other_event.hash,
             vec![],
+            vec![],
         ));
 
-        self.events.events_diff(other_events.known)
+        let events_diff = self.events.events_diff(other_events.known);
+
+        debug!("Merge Event Time: {:?}", now.elapsed());
+
+        events_diff
     }
 
     pub fn is_ancestor(&mut self, possible_ancestor: Event, e: Event) -> bool {
@@ -398,6 +433,7 @@ impl Hashgraph {
 
         for (_, undecided) in self.events.undecided.clone() {
             // start at r+1
+
             for i in undecided.round as usize..self.rounds.len() {
                 let round = &self.rounds[i].read().unwrap().clone();
 
@@ -452,7 +488,6 @@ impl Hashgraph {
     }
 
     pub fn consensus_order(&mut self, decided_events: Vec<EventHash>) {
-        //
         let mut received = decided_events
             .iter()
             .map(|hash| {
@@ -467,6 +502,10 @@ impl Hashgraph {
             .collect::<Vec<(Event, Arc<RwLock<Round>>, Arc<RwLock<RoundEvent>>)>>();
 
         received.sort_by(|(_, _, re1), (_, _, re2)| {
+            let e1 = re1.read().unwrap();
+            let e2 = re2.read().unwrap();
+
+            if *e1 == *e2 {}
             re1.read()
                 .unwrap()
                 .received
@@ -488,16 +527,40 @@ impl Hashgraph {
 
         let txs = timestamped
             .iter()
-            .map(|tuple| tuple.0.transactions.clone())
-            .collect::<Vec<Vec<Vec<u8>>>>()
-            .concat();
+            .map(|tuple| {
+                (
+                    tuple.0.transactions.clone(),
+                    tuple.0.internal_transactions.clone(),
+                )
+            })
+            .collect::<Vec<(Vec<Vec<u8>>, Vec<PeerTx>)>>();
 
         if txs.len() > 0 {
             for tx in txs.clone() {
-                self.tx_out.lock().unwrap().send(tx).unwrap();
-            }
+                // classic transactions
+                {
+                    let out = self.tx_out.lock().unwrap();
 
-            self.transactions.extend(txs);
+                    for item in tx.0.clone() {
+                        if item.len() > 0 {
+                            out.send(item).unwrap();
+                        }
+                    }
+                }
+                {
+                    let mut peers = self.peers.write().unwrap();
+                    // peer transactions
+                    for item in tx.1.clone() {
+                        if item.tx_type == PeerTxType::Join {
+                            peers.add(item.peer);
+                        }
+                        // TODO: remove peer
+                    }
+                }
+
+                self.transactions.extend(tx.0);
+                self.internal_transactions.extend(tx.1);
+            }
         }
     }
 
@@ -522,7 +585,35 @@ impl Hashgraph {
         timestamps[(timestamps.len() / 2)]
     }
 
-    pub fn get_first_decendant(&self, event: Event, possible_decendant: Event) -> Option<Event> {
+    pub fn get_first_decendant(
+        &mut self,
+        event: Event,
+        possible_decendant: Event,
+    ) -> Option<Event> {
+        let hash = (event.hash, possible_decendant.hash);
+
+        if let Some(res) = self.first_decendant_cache.get(&hash) {
+            return self.events.get_event(res.clone());
+        }
+
+        let res = self._get_first_decendant(event, possible_decendant);
+
+        if let Some(res_event) = res.clone() {
+            self.first_decendant_cache.insert(hash, res_event.hash);
+        }
+
+        res
+    }
+
+    pub fn _get_first_decendant(
+        &mut self,
+        event: Event,
+        possible_decendant: Event,
+    ) -> Option<Event> {
+        if !self.is_ancestor(event.clone(), possible_decendant.clone()) {
+            return None;
+        }
+
         if event.hash == possible_decendant.hash {
             return Some(possible_decendant);
         }
@@ -536,7 +627,9 @@ impl Hashgraph {
 
         let self_parent = self_parent.unwrap();
 
-        if self_parent.hash == event.hash {
+        if self_parent.hash == event.hash
+            || self.is_self_ancestor(event.clone(), possible_decendant.clone())
+        {
             return Some(possible_decendant);
         }
 
@@ -547,12 +640,12 @@ impl Hashgraph {
                 return Some(possible_decendant);
             }
 
-            if let Some(e) = self.get_first_decendant(event.clone(), other_parent) {
+            if let Some(e) = self._get_first_decendant(event.clone(), other_parent) {
                 return Some(e);
             }
         }
 
-        self.get_first_decendant(event, self_parent)
+        self._get_first_decendant(event, self_parent)
     }
 }
 
@@ -602,7 +695,14 @@ mod tests {
                 txs = vec![tx];
             }
 
-            let e = Event::new((idx - 48) as u64, (peer - 97) as u64, self_p, other_p, txs);
+            let e = Event::new(
+                (idx - 48) as u64,
+                (peer - 97) as u64,
+                self_p,
+                other_p,
+                txs,
+                vec![],
+            );
 
             indexes.insert(event.0.clone(), e.clone());
 
@@ -704,21 +804,27 @@ mod tests {
 
         let assert_first_decendant = |hash1: &str, hash2: &str, res: &str| {
             let ev1 = hg
+                .clone()
                 .events
                 .get_event(indexes.get(hash1).unwrap().clone().hash)
                 .unwrap();
 
             let ev2 = hg
+                .clone()
                 .events
                 .get_event(indexes.get(hash2).unwrap().clone().hash)
                 .unwrap();
 
             let ev_res = hg
+                .clone()
                 .events
                 .get_event(indexes.get(res).unwrap().clone().hash)
                 .unwrap();
 
-            assert_eq!(hg.get_first_decendant(ev1, ev2).unwrap().hash, ev_res.hash);
+            assert_eq!(
+                hg.clone().get_first_decendant(ev1, ev2).unwrap().hash,
+                ev_res.hash
+            );
         };
 
         assert_ancestor("a0", "a1", true);
@@ -863,21 +969,27 @@ mod tests {
 
         let assert_first_decendant = |hash1: &str, hash2: &str, res: &str| {
             let ev1 = hg
+                .clone()
                 .events
                 .get_event(indexes.get(hash1).unwrap().clone().hash)
                 .unwrap();
 
             let ev2 = hg
+                .clone()
                 .events
                 .get_event(indexes.get(hash2).unwrap().clone().hash)
                 .unwrap();
 
             let ev_res = hg
+                .clone()
                 .events
                 .get_event(indexes.get(res).unwrap().clone().hash)
                 .unwrap();
 
-            assert_eq!(hg.get_first_decendant(ev1, ev2).unwrap().hash, ev_res.hash);
+            assert_eq!(
+                hg.clone().get_first_decendant(ev1, ev2).unwrap().hash,
+                ev_res.hash
+            );
         };
 
         // witness

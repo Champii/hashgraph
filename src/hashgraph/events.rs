@@ -25,18 +25,8 @@ impl Events {
     }
 
     pub fn insert_event(&mut self, event: Event) {
-        if let Some(_) = self.by_hash.get(&event.hash) {
-            warn!("Trying to insert known event: {:?}", event);
-
+        if !self.check_event(&event) {
             return;
-        }
-
-        if let Some(events) = self.by_creator.get(&event.creator) {
-            if events.len() != event.id as usize {
-                warn!("Trying to insert non-sequential event: {:?}", event);
-
-                return;
-            }
         }
 
         self.by_hash.insert(event.hash, event.clone());
@@ -48,6 +38,45 @@ impl Events {
             .or_insert(vec![event.clone()]);
 
         trace!("INSERT EVENT {:?}", event);
+    }
+
+    fn check_event(&self, event: &Event) -> bool {
+        if let Some(_) = self.by_hash.get(&event.hash) {
+            warn!("Insert event: Known event: {:?}", event);
+
+            return false;
+        }
+
+        let creator_events = self.by_creator.get(&event.creator);
+
+        if let Some(events) = creator_events {
+            if events.len() != event.id as usize {
+                error!("Insert event: Non-sequential event: {:?}", event);
+
+                return false;
+            }
+        }
+
+        match self.by_hash.get(&event.self_parent) {
+            Some(e) => {
+                if e.creator != event.creator {
+                    error!("Insert event: Bad event self-parent {:?}", event);
+
+                    return false;
+                }
+            }
+            None => {
+                if let Some(arr) = creator_events {
+                    if arr.len() > 0 {
+                        error!("Insert event: Bad event self-parent is nil {:?}", event);
+
+                        return false;
+                    }
+                }
+            }
+        }
+
+        true
     }
 
     pub fn known_events(&self) -> HashMap<EventCreator, u64> {
