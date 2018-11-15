@@ -37,7 +37,9 @@ impl RoundEvent {
 #[derive(Clone, Default, Debug)]
 pub struct Round {
     pub id: u64,
+    // todo: remove this unecessary arc mutex
     pub events: HashMap<EventHash, Arc<RwLock<RoundEvent>>>,
+    // todo: remove this unecessary arc mutex
     pub witnesses: HashMap<EventHash, Arc<RwLock<RoundEvent>>>,
     pub peers: Peers,
     pub decided: bool,

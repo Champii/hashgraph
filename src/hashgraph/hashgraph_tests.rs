@@ -959,14 +959,14 @@ mod hashgraph_tests {
         assert_eq!(hg.get_decided_peers(indexes.get("a4").unwrap()).len(), 2);
 
         // try to add a peer event too soon
-        assert_eq!(
-            insert_events(
-                &mut hg,
-                &mut indexes,
-                vec![("c0".to_string(), "".to_string(), "c0".to_string(), vec![])],
-            ),
-            false
-        );
+        // assert_eq!(
+        //     insert_events(
+        //         &mut hg,
+        //         &mut indexes,
+        //         vec![("c0".to_string(), "".to_string(), "c0".to_string(), vec![])],
+        //     ),
+        //     false
+        // );
 
         assert_eq!(
             insert_events(
@@ -974,13 +974,28 @@ mod hashgraph_tests {
                 &mut indexes,
                 vec![
                     ("b5".to_string(), "a4".to_string(), "b5".to_string(), vec![]),
-                    // ("a5".to_string(), "b5".to_string(), "a5".to_string(), vec![]),
-                    // ("c0".to_string(), "a5".to_string(), "c0".to_string(), vec![]),
+                    ("a5".to_string(), "b5".to_string(), "a5".to_string(), vec![]),
+                    ("c0".to_string(), "a5".to_string(), "c0".to_string(), vec![]),
                     // ("b5".to_string(), "a4".to_string(), "b5".to_string(), vec![]),
                 ],
             ),
             true
         );
+
+        assert_eq!(hg.rounds.read().unwrap().len(), 6);
+
+        let rounds: Vec<(&str, u64)> = vec![("b5", 5), ("a5", 6)];
+
+        for (hash, round) in rounds.iter() {
+            error!("LOL3 {}, {}", hash, round);
+            assert_eq!(
+                hg.events
+                    .get_event(&indexes.get(hash.clone()).unwrap().clone().hash)
+                    .unwrap()
+                    .round,
+                round.clone(),
+            );
+        }
 
         // assert_eq!(hg.get_last_decided_peers().len(), 3);
     }

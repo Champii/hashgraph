@@ -271,10 +271,22 @@ impl Node {
 
         info!("Synced");
 
+        let other_last = hg
+            .events
+            .get_last_event_of(
+                hg.get_last_decided_peers()
+                    .get_by_socket_addr(addr)
+                    .unwrap()
+                    .id,
+            )
+            .unwrap()
+            .id;
+
         hg.insert_event(Event::new(
             0,
             self_peer.id,
             0,
+            // other_last,
             0,
             vec![self_peer.id.to_string().into_bytes()],
             vec![],
@@ -335,6 +347,7 @@ impl Node {
 
                     if let Err(e) = c {
                         // error!("Error connect: {}", e);
+                        // send leave tx
 
                         continue;
                     }

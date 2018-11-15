@@ -49,19 +49,11 @@ service! {
     fn ask_join(&mut self, peer: super::Peer) -> bool{
 
       if self.hg.read().unwrap().get_last_decided_peers().len() == 1 {
-          error!("HERE CA FOURE");
           let mut  hg = self.hg.write().unwrap();
-
-          // {
-          //   let rounds_len = hg.rounds.len();
-          //   let mut rounds = hg.rounds.clone();
-          //   let mut peers = &mut rounds.values().last().unwrap().write().unwrap().peers;
-
-          //   peers.add(peer.clone());
-          // }
 
           hg.add_self_event(vec![], vec![super::PeerTx::new_join(peer)]);
 
+          // force consensus
           hg.add_self_event(vec![], vec![]);
           hg.add_self_event(vec![], vec![]);
           hg.add_self_event(vec![], vec![]);
