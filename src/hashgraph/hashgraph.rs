@@ -1,19 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use super::event::{Event, EventCreator, EventHash};
-use super::events::{Events, EventsDiff};
+use super::events::{Events, EventsDiff, Frame};
 use super::internal_txs::{PeerTx, PeerTxType};
+use super::peer::Peer;
 use super::peers::Peers;
 use super::round::{FamousType, Round, RoundEvent};
 
 #[derive(Debug, Clone)]
 pub struct Hashgraph {
-    pub peers: Arc<RwLock<Peers>>,
+    // pub peers: Arc<RwLock<Peers>>,
     pub events: Events,
-    pub rounds: Vec<Arc<RwLock<Round>>>,
+    pub rounds: Arc<RwLock<BTreeMap<u64, Round>>>, // round_id -> round
     pub tx_out: Arc<Mutex<Sender<Vec<u8>>>>,
     pub transactions: Vec<Vec<u8>>,
     pub internal_transactions: Vec<PeerTx>,
@@ -30,18 +31,26 @@ impl Default for Hashgraph {
         let (tx_out, _) = channel();
 
         Hashgraph::new(
-            Arc::new(RwLock::new(Peers::new())),
+            // Arc::new(RwLock::new(Peers::new())),
             Arc::new(Mutex::new(tx_out)),
         )
     }
 }
 
 impl Hashgraph {
-    pub fn new(peers: Arc<RwLock<Peers>>, tx_out: Arc<Mutex<Sender<Vec<u8>>>>) -> Hashgraph {
+    pub fn new(tx_out: Arc<Mutex<Sender<Vec<u8>>>>) -> Hashgraph {
+        // let mut first_round = Round::new(1);
+        // let mut rounds = ;
+
+        // first_round.peers = peers.read().unwrap().clone();
+
+        // // TODO, dont start at 1
+        // rounds.insert(1, Arc::new(RwLock::new(first_round))); // rounds start at 1
+
         Hashgraph {
-            peers,
+            // peers,
             events: Events::new(),
-            rounds: vec![Arc::new(RwLock::new(Round::new(1)))], // rounds start at 1
+            rounds: Arc::new(RwLock::new(BTreeMap::new())),
             transactions: vec![],
             internal_transactions: vec![],
             tx_out,
@@ -53,19 +62,29 @@ impl Hashgraph {
         }
     }
 
-    pub fn add_self_event(&mut self, tx: Vec<u8>, _peer_txs: Vec<PeerTx>) {
-        let mut peer_txs = _peer_txs.clone();
+    // used by first node to setup the first round
+    pub fn bootstrap(&mut self, peers: Peers) {
+        let mut first_round = Round::new(1);
 
-        // if no peers and a peer is added, add the first without consensus
-        if peer_txs.len() > 0 && self.peers.read().unwrap().len() == 1 {
-            self.peers.write().unwrap().add(peer_txs[0].clone().peer);
+        first_round.peers = peers.clone();
 
-            peer_txs = peer_txs[1..].to_vec();
+        self.rounds.write().unwrap().insert(1, first_round); // rounds start at 1
+    }
+
+    pub fn add_self_event(&mut self, tx: Vec<u8>, _peer_txs: Vec<PeerTx>) -> bool {
+        let peer_txs = _peer_txs.clone();
+
+        let self_id = self.get_last_decided_peers().self_id;
+
+        let last_own_event = self.events.get_last_event_of(self_id);
+
+        if last_own_event.is_none() {
+            error!("Add self event: no events from self");
+
+            return false;
         }
 
-        let self_id = self.peers.read().unwrap().self_id;
-
-        let last_own_event = self.events.get_last_event_of(self_id).unwrap();
+        let last_own_event = last_own_event.unwrap();
 
         self.insert_event(Event::new(
             last_own_event.id + 1,
@@ -74,19 +93,69 @@ impl Hashgraph {
             0,
             vec![tx],
             peer_txs,
-        ));
+        ))
     }
 
-    pub fn insert_event(&mut self, event: Event) {
-        let mut e = event.clone();
+    pub fn insert_event(&mut self, event: Event) -> bool {
+        let mut event = event.clone();
 
-        let round_id = self.set_round(event.clone());
+        event.round = 0;
 
-        e.round = round_id;
+        if !self.events.check_event(&event) {
+            return false;
+        }
 
-        self.events.insert_event(e.clone());
+        let round = self.get_parent_round(event.clone());
 
-        self.process_fame(e.clone());
+        event.round = self.get_round_id(event.clone());
+
+        if self
+            .get_decided_peers(&event)
+            .get_by_id(event.creator)
+            .is_none()
+        {
+            error!("ROUND PEERS: {:?}", self.get_decided_peers(&event));
+            error!("Error: Insert event: Peer not in the round: {:?}", event);
+
+            return false;
+        }
+
+        self.add_to_round(event.clone());
+
+        self.events.insert_event(event.clone());
+
+        self.process_fame(event.clone());
+
+        true
+    }
+
+    pub fn get_last_decided_peers(&self) -> Peers {
+        // error!("RETURNING LAST PEERS !!!!!!!");
+        let round = self.rounds.read().unwrap().values().last().unwrap().clone();
+
+        round.peers.clone()
+    }
+
+    // pub fn get_first_decided_peers(&self) -> Peers {
+    //     error!("RETURNING FIRST PEERS !!!!!!!");
+    //     let round = self.rounds.read().unwrap().values().next().unwrap().clone();
+
+    //     round.peers.clone()
+    // }
+
+    pub fn get_decided_peers(&self, event: &Event) -> Peers {
+        // error!("DECIDED PEER {:?}", event.round);
+        if event.round == 0 {
+            return self.get_last_decided_peers();
+        }
+
+        match self.rounds.read().unwrap().get(&event.round) {
+            Some(round) => round.peers.clone(),
+            None => match self.rounds.read().unwrap().get(&(event.round - 1)) {
+                Some(round) => round.peers.clone(),
+                None => self.get_last_decided_peers(),
+            },
+        }
     }
 
     pub fn merge_events(
@@ -94,27 +163,44 @@ impl Hashgraph {
         self_id: u64,
         peer_id: u64,
         other_events: EventsDiff,
-    ) -> EventsDiff {
+    ) -> Result<EventsDiff, String> {
         let now = SystemTime::now();
 
-        if other_events.diff.len() == 0 {
-            return EventsDiff::default();
-        }
+        let mut merged = 0;
 
         for (hash, events) in other_events.diff {
-            for event in events {
-                self.insert_event(event);
+            for event in events.values() {
+                self.insert_event(event.clone());
+
+                merged += 1;
             }
         }
 
-        let last_own_event = self.events.get_last_event_of(self_id).unwrap();
+        // todo: post checks to validate other parents
+
+        if other_events.has_more {
+            warn!("Has more");
+
+            return Err("Has more".to_string());
+        }
+
+        let last_own_event = self.events.get_last_event_of(self_id);
+
+        // syncing
+        if last_own_event.is_none() {
+            warn!("No own event {}", self_id);
+
+            return Err(format!("No own event {}", self_id));
+        }
+
+        let last_own_event = last_own_event.unwrap();
 
         let last_other_event = self.events.get_last_event_of(peer_id);
 
         if last_other_event.is_none() {
             error!("Merge Events: Unknown peer");
 
-            return EventsDiff::default();
+            return Err("Merge Events: Unknown peer".to_string());
         }
 
         let last_other_event = last_other_event.unwrap();
@@ -128,11 +214,14 @@ impl Hashgraph {
             vec![],
         ));
 
-        let events_diff = self.events.events_diff(other_events.known);
+        let mut events_diff = self.events.events_diff(other_events.known, 0);
 
-        debug!("Merge Event Time: {:?}", now.elapsed());
+        events_diff.sender_id = self_id;
 
-        events_diff
+        debug!("Merge Event count: {}", merged);
+        debug!("Merge Time: {:?}", now.elapsed());
+
+        Ok(events_diff)
     }
 
     pub fn is_ancestor(&mut self, possible_ancestor: Event, e: Event) -> bool {
@@ -154,8 +243,8 @@ impl Hashgraph {
             return true;
         }
 
-        let self_parent = self.events.get_event(e.self_parent);
-        let other_parent = self.events.get_event(e.other_parent);
+        let self_parent = self.events.get_event(&e.self_parent);
+        let other_parent = self.events.get_event(&e.other_parent);
 
         if self_parent.is_none() {
             return false;
@@ -201,7 +290,7 @@ impl Hashgraph {
     }
 
     pub fn _is_self_ancestor(&mut self, possible_ancestor: Event, e: Event) -> bool {
-        let self_parent = self.events.get_event(e.self_parent);
+        let self_parent = self.events.get_event(&e.self_parent);
 
         if self_parent.is_none() {
             return false;
@@ -239,7 +328,7 @@ impl Hashgraph {
     }
 
     pub fn _strongly_see(&mut self, e: Event, possible_see: Event) -> bool {
-        let super_majority = self.peers.read().unwrap().super_majority;
+        let super_majority = self.get_decided_peers(&e).super_majority;
 
         let res = self.strongly_see_with_path(e, possible_see);
 
@@ -268,8 +357,8 @@ impl Hashgraph {
         e: Event,
         possible_see: Event,
     ) -> (bool, Vec<EventCreator>) {
-        let self_parent = self.events.get_event(e.self_parent);
-        let other_parent = self.events.get_event(e.other_parent);
+        let self_parent = self.events.get_event(&e.self_parent);
+        let other_parent = self.events.get_event(&e.other_parent);
 
         if let Some(other_parent) = other_parent {
             if other_parent.hash == possible_see.hash {
@@ -316,81 +405,120 @@ impl Hashgraph {
 
         let mut ss_count = 0;
 
-        for (_, witness) in last_round.read().unwrap().witnesses.iter() {
-            let got_witness = self.events.get_event(witness.read().unwrap().hash).unwrap();
+        for (_, witness) in last_round.witnesses.iter() {
+            let got_witness = self
+                .events
+                .get_event(&witness.read().unwrap().hash)
+                .unwrap();
 
             if self.strongly_see(e.clone(), got_witness) {
                 ss_count += 1;
             }
         }
 
-        ss_count >= self.peers.read().unwrap().super_majority
+        // error!(
+        //     "WITNESS {} {}",
+        //     ss_count,
+        //     self.get_decided_peers(&e).super_majority
+        // );
+
+        ss_count >= self.get_decided_peers(&e).super_majority
     }
 
-    pub fn set_round(&mut self, e: Event) -> u64 {
+    pub fn get_round_id(&mut self, e: Event) -> u64 {
+        let e = e.clone();
+
         let is_witness = self.is_witness(e.clone());
 
         let last_round = self.get_parent_round(e.clone());
-        let mut last_round_id = last_round.read().unwrap().id;
+        let mut last_round_id = last_round.id;
 
         if !e.is_root() && is_witness {
             last_round_id += 1;
         }
 
-        if self.rounds.len() == last_round_id as usize - 1 {
-            // new round
-            let mut round = Round::new(last_round_id);
-
-            round.insert(e.clone(), is_witness);
-
-            self.rounds.push(Arc::new(RwLock::new(round)));
-        } else {
-            // add to current round
-            (*self.rounds[last_round_id as usize - 1].write().unwrap())
-                .insert(e.clone(), is_witness);
-        }
-
         last_round_id
     }
 
-    pub fn get_parent_round(&self, e: Event) -> Arc<RwLock<Round>> {
-        let self_parent = self.events.get_event(e.self_parent);
-        let other_parent = self.events.get_event(e.other_parent);
+    pub fn add_to_round(&mut self, e: Event) -> bool {
+        if e.round == 0 {
+            return false;
+        }
 
-        let mut round = 1;
+        let e = e.clone();
+        let last_round = self.get_parent_round(e.clone());
+        let is_witness = self.is_witness(e.clone());
+
+        self.rounds
+            .write()
+            .unwrap()
+            .entry(e.round)
+            .and_modify(|round| {
+                round.insert(e.clone(), is_witness);
+            })
+            .or_insert_with(|| {
+                let mut round = Round::new(e.round);
+
+                round.peers = last_round.peers.clone();
+
+                round.insert(e.clone(), is_witness);
+
+                round
+            });
+
+        true
+    }
+
+    pub fn get_parent_round_id(&self, e: Event) -> u64 {
+        let round = self.get_parent_round(e);
+
+        let res = round;
+
+        res.id
+    }
+
+    pub fn get_parent_round(&self, e: Event) -> Round {
+        let self_parent = self.events.get_event(&e.self_parent);
+
+        let mut round = self.rounds.read().unwrap().iter().last().unwrap().0.clone();
 
         if self_parent.is_some() {
             round = self_parent.unwrap().round
-        } else if other_parent.is_some() {
-            let other_round = other_parent.unwrap().round;
-
-            if other_round > round {
-                round = other_round
-            }
         }
 
-        self.rounds[round as usize - 1].clone()
+        self.rounds.read().unwrap().get(&round).unwrap().clone()
     }
 
     pub fn process_fame(&mut self, e: Event) {
-        if e.round == 1 || !self.is_witness(e.clone()) {
+        // warn!("PROCESS FAME {} {}", e.round, self.is_witness(e.clone()));
+        let first_round_nb = self.rounds.read().unwrap().keys().next().unwrap().clone();
+
+        if e.round == first_round_nb || !self.is_witness(e.clone()) {
             return;
         }
 
-        let round = self.rounds[e.round as usize - 1].clone();
-        let round_event = round.read().unwrap().events.get(&e.hash).unwrap().clone();
+        let round = self.rounds.read().unwrap().get(&e.round).unwrap().clone();
+        let round_event = round.events.get(&e.hash).unwrap().clone();
 
-        let prev_round = self.rounds[e.round as usize - 2].clone();
+        let prev_round = self
+            .rounds
+            .read()
+            .unwrap()
+            .get(&(e.round - 1))
+            .unwrap()
+            .clone();
 
         // count votes
         let mut vote_results = HashMap::new();
 
-        for (_, witness) in prev_round.read().unwrap().witnesses.iter() {
+        for (_, witness) in prev_round.witnesses.iter() {
             let wit_hash = witness.read().unwrap().hash;
-            let got_witness = self.events.get_event(wit_hash).unwrap();
+            let got_witness = self.events.get_event(&wit_hash).unwrap();
 
             // vote
-            (*round_event.write().unwrap())
+            round_event
+                .write()
+                .unwrap()
                 .votes
                 .insert(wit_hash, self.see(e.clone(), got_witness.clone()));
 
@@ -405,23 +533,27 @@ impl Hashgraph {
         }
 
         for (hash, votes) in vote_results.iter() {
-            let prev_prev_round = self.rounds[e.round as usize - 3].read().unwrap();
-            if votes.clone() >= self.peers.read().unwrap().super_majority {
-                (*(*prev_prev_round)
+            let super_majority = self.get_decided_peers(&e).super_majority;
+
+            let mut rounds = self.rounds.write().unwrap();
+            let mut prev_prev_round = rounds.get_mut(&(e.round - 2)).unwrap();
+
+            if votes.clone() >= super_majority {
+                prev_prev_round
                     .events
                     .get(hash)
                     .unwrap()
                     .write()
-                    .unwrap())
-                .famous = FamousType::True;
+                    .unwrap()
+                    .famous = FamousType::True;
             } else {
-                (*(*prev_prev_round)
+                prev_prev_round
                     .events
                     .get(hash)
                     .unwrap()
                     .write()
-                    .unwrap())
-                .famous = FamousType::False;
+                    .unwrap()
+                    .famous = FamousType::False;
             }
         }
 
@@ -429,13 +561,17 @@ impl Hashgraph {
     }
 
     pub fn decide_round_received(&mut self) {
+        // warn!("DECIDE ROUND");
+
         let mut decided_events = vec![];
 
         for (_, undecided) in self.events.undecided.clone() {
             // start at r+1
 
-            for i in undecided.round as usize..self.rounds.len() {
-                let round = &self.rounds[i].read().unwrap().clone();
+            let last_round = self.rounds.read().unwrap().iter().last().unwrap().0.clone();
+
+            for i in undecided.round + 1..last_round {
+                let round = &self.rounds.read().unwrap().get(&i).unwrap().clone();
 
                 let witness_iter = round.witnesses.iter();
 
@@ -456,7 +592,7 @@ impl Hashgraph {
                 let mut decided = true;
 
                 for (hash, _) in famous {
-                    let got_witness = self.events.get_event(hash.clone()).unwrap();
+                    let got_witness = self.events.get_event(&hash).unwrap();
 
                     if !self.see(got_witness, undecided.clone()) {
                         decided = false;
@@ -466,10 +602,20 @@ impl Hashgraph {
                 }
 
                 if decided {
-                    let round = self.rounds[undecided.round as usize - 1].read().unwrap();
+                    let mut rounds = &mut self.rounds.write().unwrap();
 
-                    (*round.events.get(&undecided.hash).unwrap().write().unwrap()).received =
-                        i as u64 + 1;
+                    rounds
+                        .get(&undecided.round)
+                        .unwrap()
+                        .events
+                        .get(&undecided.hash)
+                        .unwrap()
+                        .write()
+                        .unwrap()
+                        .received = i as u64;
+
+                    // (*round.events.get(&undecided.hash).unwrap().write().unwrap()).received =
+                    //     i as u64;
 
                     decided_events.push(undecided.hash.clone());
 
@@ -482,6 +628,9 @@ impl Hashgraph {
             self.events.undecided.remove(&hash);
         }
 
+        warn!("UNDECIDED {}", self.events.undecided.len());
+        // warn!("DECIDED {}", decided_events.len());
+
         if decided_events.len() > 0 {
             self.consensus_order(decided_events);
         }
@@ -491,21 +640,32 @@ impl Hashgraph {
         let mut received = decided_events
             .iter()
             .map(|hash| {
-                let event = self.events.get_event(hash.clone()).unwrap();
-                let round_borrowed = self.rounds[event.round as usize - 1].read().unwrap();
+                let event = self.events.get_event(&hash).unwrap();
+                let round_borrowed = self
+                    .rounds
+                    .read()
+                    .unwrap()
+                    .get(&event.round)
+                    .unwrap()
+                    .clone();
+
                 let round_event = round_borrowed.events.get(&hash).unwrap();
-                let round_received =
-                    self.rounds[round_event.read().unwrap().received as usize - 1].clone();
+                let round_received = self
+                    .rounds
+                    .read()
+                    .unwrap()
+                    .get(&round_event.read().unwrap().received)
+                    .unwrap()
+                    .clone();
 
                 (event, round_received, round_event.clone())
             })
-            .collect::<Vec<(Event, Arc<RwLock<Round>>, Arc<RwLock<RoundEvent>>)>>();
+            .collect::<Vec<(Event, Round, Arc<RwLock<RoundEvent>>)>>();
 
         received.sort_by(|(_, _, re1), (_, _, re2)| {
             let e1 = re1.read().unwrap();
             let e2 = re2.read().unwrap();
 
-            if *e1 == *e2 {}
             re1.read()
                 .unwrap()
                 .received
@@ -519,11 +679,28 @@ impl Hashgraph {
 
                 re.write().unwrap().timestamp = t;
 
-                (e.clone(), t)
-            })
-            .collect::<Vec<(Event, u64)>>();
+                // {
+                //     let mut r = r.write().unwrap();
 
-        timestamped.sort_by(|(_, t1), (_, t2)| t1.cmp(t2));
+                //     r.decided = true;
+                // }
+
+                (e.clone(), r.clone(), t)
+            })
+            .collect::<Vec<(Event, Round, u64)>>();
+
+        timestamped.sort_by(|(_, _, t1), (_, _, t2)| t1.cmp(t2));
+
+        // process tie here
+
+        // error!(
+        //     "TIMESTAMPS {:?}",
+        //     timestamped
+        //         .clone()
+        //         .iter()
+        //         .map(|t| t.2)
+        //         .collect::<Vec<u64>>()
+        // );
 
         let txs = timestamped
             .iter()
@@ -531,9 +708,10 @@ impl Hashgraph {
                 (
                     tuple.0.transactions.clone(),
                     tuple.0.internal_transactions.clone(),
+                    tuple.1.clone(),
                 )
             })
-            .collect::<Vec<(Vec<Vec<u8>>, Vec<PeerTx>)>>();
+            .collect::<Vec<(Vec<Vec<u8>>, Vec<PeerTx>, Round)>>();
 
         if txs.len() > 0 {
             for tx in txs.clone() {
@@ -548,13 +726,38 @@ impl Hashgraph {
                     }
                 }
                 {
-                    let mut peers = self.peers.write().unwrap();
-                    // peer transactions
-                    for item in tx.1.clone() {
-                        if item.tx_type == PeerTxType::Join {
-                            peers.add(item.peer);
+                    if tx.1.len() > 0 {
+                        let mut round = &mut tx.2.clone();
+
+                        let mut last_round =
+                            self.rounds.read().unwrap().values().last().unwrap().clone();
+                        let last_round_id = last_round.id;
+
+                        for i in last_round_id + 1..=round.id + 3 {
+                            let mut r = Round::new(i);
+
+                            r.peers = last_round.peers.clone();
+
+                            self.rounds.write().unwrap().insert(i, r);
                         }
-                        // TODO: remove peer
+
+                        let mut rounds = self.rounds.write().unwrap();
+
+                        let rounds_to_modify = rounds
+                            .iter()
+                            .skip_while(|(id, _)| id < &&(round.id + 3))
+                            .map(|tuple| tuple.0.clone())
+                            .collect::<Vec<u64>>();
+
+                        // peer transactions
+                        for item in tx.1.clone() {
+                            if item.tx_type == PeerTxType::Join {
+                                for round in rounds_to_modify.clone() {
+                                    rounds.get_mut(&round).unwrap().peers.add(item.peer.clone());
+                                }
+                            }
+                            // TODO: remove peer
+                        }
                     }
                 }
 
@@ -564,15 +767,16 @@ impl Hashgraph {
         }
     }
 
-    pub fn get_consensus_timestamp(&mut self, event: Event, round: &Arc<RwLock<Round>>) -> u64 {
+    pub fn get_consensus_timestamp(&mut self, event: Event, round: &Round) -> u64 {
         let mut timestamps = round
-            .read()
-            .unwrap()
             .witnesses
             .iter()
             .filter(|(_, e)| e.read().unwrap().famous == FamousType::True)
             .map(|(_, witness)| {
-                let witness_event = self.events.get_event(witness.read().unwrap().hash).unwrap();
+                let witness_event = self
+                    .events
+                    .get_event(&witness.read().unwrap().hash)
+                    .unwrap();
 
                 self.get_first_decendant(event.clone(), witness_event)
                     .unwrap()
@@ -582,7 +786,22 @@ impl Hashgraph {
 
         timestamps.sort();
 
-        timestamps[(timestamps.len() / 2)]
+        let middle_idx = timestamps.len() / 2;
+        let middle = timestamps[middle_idx];
+
+        let before = if middle_idx > 0 {
+            timestamps[middle_idx - 1]
+        } else {
+            middle
+        };
+
+        let after = if timestamps.len() > middle_idx + 1 {
+            timestamps[middle_idx + 1]
+        } else {
+            middle
+        };
+
+        (before + middle + after) / 3
     }
 
     pub fn get_first_decendant(
@@ -593,7 +812,7 @@ impl Hashgraph {
         let hash = (event.hash, possible_decendant.hash);
 
         if let Some(res) = self.first_decendant_cache.get(&hash) {
-            return self.events.get_event(res.clone());
+            return self.events.get_event(&res);
         }
 
         let res = self._get_first_decendant(event, possible_decendant);
@@ -618,8 +837,8 @@ impl Hashgraph {
             return Some(possible_decendant);
         }
 
-        let self_parent = self.events.get_event(possible_decendant.self_parent);
-        let other_parent = self.events.get_event(possible_decendant.other_parent);
+        let self_parent = self.events.get_event(&possible_decendant.self_parent);
+        let other_parent = self.events.get_event(&possible_decendant.other_parent);
 
         if self_parent.is_none() {
             return None;
@@ -647,631 +866,54 @@ impl Hashgraph {
 
         self._get_first_decendant(event, self_parent)
     }
-}
 
-mod tests {
-    use std::collections::HashMap;
-    use std::sync::mpsc::{channel, Receiver};
-    use std::sync::{Arc, Mutex, RwLock};
+    pub fn get_last_frame(&self, peer_id: u64) -> Frame {
+        if self.get_last_decided_peers().get_by_id(peer_id).is_none() {
+            return Frame::new();
+        }
 
-    use super::Event;
-    #[allow(unused_imports)]
-    use super::FamousType;
-    use super::Hashgraph;
-    use super::Peers;
-    #[allow(unused_imports)]
-    use peer::Peer;
+        let rounds_len = self.rounds.read().unwrap().iter().last().unwrap().0.clone();
 
-    // new_hash, other_parent
-    type EventInsert = (String, String, String);
+        let bound = if rounds_len <= 5 { 1 } else { rounds_len - 4 };
 
-    #[allow(dead_code)]
-    fn insert_events(
-        to_insert: Vec<EventInsert>,
-        peers: Peers,
-    ) -> (Hashgraph, HashMap<String, Event>, Receiver<Vec<u8>>) {
-        let mut indexes = HashMap::new();
-        let (tx_out, tx_out_recv) = channel();
+        let mut frame = Frame::new();
 
-        let mut hg = Hashgraph::new(Arc::new(RwLock::new(peers)), Arc::new(Mutex::new(tx_out)));
+        error!("FRAME: {} - {}", bound, rounds_len);
 
-        for event in to_insert.iter() {
-            let event_hash_bytes = event.0.as_bytes();
-            let peer = event_hash_bytes[0];
-            let idx = event_hash_bytes[1];
+        for i in bound..=rounds_len {
+            let round = self.rounds.read().unwrap().get(&i).unwrap().clone();
 
-            let self_hash: &[u8] = &(if idx == 0 { [peer, 0] } else { [peer, idx - 1] });
+            let mut creator_events = HashMap::new();
 
-            let self_p = indexes
-                .get(&String::from_utf8(self_hash.to_vec()).unwrap())
-                .map_or(0, |ev: &Event| ev.hash);
+            for (e_hash, _) in round.events.iter() {
+                let event = self.events.get_event(e_hash).unwrap();
 
-            let other_p = indexes.get(&event.1).map_or(0, |ev: &Event| ev.hash);
-
-            let tx = event.2.clone().into_bytes();
-            let mut txs = vec![];
-
-            if tx.len() > 0 {
-                txs = vec![tx];
+                creator_events
+                    .entry(event.creator)
+                    .or_insert_with(|| BTreeMap::new())
+                    .insert(event.id, event.clone());
             }
 
-            let e = Event::new(
-                (idx - 48) as u64,
-                (peer - 97) as u64,
-                self_p,
-                other_p,
-                txs,
-                vec![],
-            );
-
-            indexes.insert(event.0.clone(), e.clone());
-
-            // println!("INSERT {}", event.0);
-
-            hg.insert_event(e)
+            frame
+                .events
+                .insert(i, (round.peers.clone(), creator_events));
         }
 
-        (hg, indexes, tx_out_recv)
-    }
-
-    /*
-        b1
-       /|
-      / |
-    a1  |
-    | \ |
-    |  \|
-    a0  b0
-    */
-
-    #[test]
-    fn simple_test() {
-        let mut peers = Peers::new();
-
-        let peer1 = Peer::new("127.0.0.1:1".parse().unwrap(), vec![0]);
-        let peer2 = Peer::new("127.0.0.1:2".parse().unwrap(), vec![1]);
-
-        peers.add(peer1.clone());
-        peers.add(peer2.clone());
-
-        // (name, other_parent)
-        let to_insert = vec![
-            ("a0".to_string(), "".to_string(), "".to_string()),
-            ("b0".to_string(), "".to_string(), "".to_string()),
-            ("a1".to_string(), "b0".to_string(), "".to_string()),
-            ("b1".to_string(), "a1".to_string(), "".to_string()),
-        ];
-
-        let (hg, indexes, _) = insert_events(to_insert, peers);
-
-        // ancestor
-        let assert_ancestor = |hash1: &str, hash2: &str, res: bool| {
-            assert_eq!(
-                hg.clone().is_ancestor(
-                    indexes.get(hash1).unwrap().clone(),
-                    indexes.get(hash2).unwrap().clone()
-                ),
-                res
-            );
-        };
-        let assert_self_ancestor = |hash1: &str, hash2: &str, res: bool| {
-            assert_eq!(
-                hg.clone().is_self_ancestor(
-                    indexes.get(hash1).unwrap().clone(),
-                    indexes.get(hash2).unwrap().clone()
-                ),
-                res
-            );
-        };
-
-        let assert_see = |hash1: &str, hash2: &str, res: bool| {
-            assert_eq!(
-                hg.clone().see(
-                    indexes.get(hash1).unwrap().clone(),
-                    indexes.get(hash2).unwrap().clone()
-                ),
-                res
-            );
-        };
-
-        let assert_strongly_see = |hash1: &str, hash2: &str, res: bool| {
-            assert_eq!(
-                hg.clone().strongly_see(
-                    indexes.get(hash1).unwrap().clone(),
-                    indexes.get(hash2).unwrap().clone()
-                ),
-                res
-            );
-        };
-
-        let assert_witness = |hash: &str, res: bool| {
-            assert_eq!(
-                hg.clone().is_witness(indexes.get(hash).unwrap().clone()),
-                res
-            );
-        };
-
-        let assert_round = |hash: &str, res: u64| {
-            assert_eq!(
-                hg.clone()
-                    .events
-                    .get_event(indexes.get(hash).unwrap().clone().hash)
-                    .unwrap()
-                    .round,
-                res
-            );
-        };
-
-        let assert_first_decendant = |hash1: &str, hash2: &str, res: &str| {
-            let ev1 = hg
-                .clone()
-                .events
-                .get_event(indexes.get(hash1).unwrap().clone().hash)
-                .unwrap();
-
-            let ev2 = hg
-                .clone()
-                .events
-                .get_event(indexes.get(hash2).unwrap().clone().hash)
-                .unwrap();
-
-            let ev_res = hg
-                .clone()
-                .events
-                .get_event(indexes.get(res).unwrap().clone().hash)
-                .unwrap();
-
-            assert_eq!(
-                hg.clone().get_first_decendant(ev1, ev2).unwrap().hash,
-                ev_res.hash
-            );
-        };
-
-        assert_ancestor("a0", "a1", true);
-        assert_ancestor("b0", "a1", true);
-        assert_ancestor("a0", "b1", true);
-        assert_ancestor("b0", "b1", true);
-        assert_ancestor("a1", "b1", true);
-
-        assert_ancestor("b0", "a0", false);
-        assert_ancestor("b1", "a0", false);
-
-        // self ancestor
-
-        assert_self_ancestor("a0", "a1", true);
-        assert_self_ancestor("b0", "b1", true);
-
-        assert_self_ancestor("a0", "b1", false);
-        assert_self_ancestor("b0", "a1", false);
-
-        // see
-
-        assert_see("a1", "a0", true);
-        assert_see("a1", "b0", true);
-        assert_see("b1", "a0", true);
-        assert_see("b1", "b0", true);
-        assert_see("b1", "a1", true);
-
-        assert_see("a0", "b0", false);
-        assert_see("a0", "b1", false);
-
-        assert_see("b0", "a0", false);
-        assert_see("b0", "a1", false);
-        assert_see("b0", "b1", false);
-
-        assert_see("a0", "b0", false);
-        assert_see("a0", "a1", false);
-        assert_see("a0", "b1", false);
-
-        // strongly see
-
-        assert_strongly_see("a1", "b0", true);
-        assert_strongly_see("b1", "a0", true);
-        assert_strongly_see("b1", "a1", true);
-        assert_strongly_see("b1", "b0", true);
-
-        assert_strongly_see("a1", "a0", false);
-
-        // witness
-
-        assert_witness("a0", true);
-        assert_witness("b0", true);
-        assert_witness("a1", false);
-        assert_witness("b1", true);
-
-        // rounds
-
-        assert_round("a0", 1);
-        assert_round("b0", 1);
-        assert_round("a1", 1);
-        assert_round("b1", 2);
-
-        assert_first_decendant("a0", "b1", "a1");
-        assert_first_decendant("a1", "b1", "b1");
-        assert_first_decendant("b1", "b1", "b1");
-        assert_first_decendant("b0", "b1", "b1");
-    }
-
-    /*
-    |   b4  |
-    |   |   |
-    |   b3  |
-    |  /|   | ---- r1
-    | / b2  |
-    |/  |   |
-    a2  |   |
-    | \ |   |
-    |   \   |
-    |   | \ |
-    a1  |   c2
-    |   | / |
-    |   b1  c1
-    | / |   |
-    a0  b0  c0
-    0   1    2
-    */
-
-    #[test]
-    fn complex_test() {
-        let mut peers = Peers::new();
-
-        let peer1 = Peer::new("127.0.0.1:1".parse().unwrap(), vec![0]);
-        let peer2 = Peer::new("127.0.0.1:2".parse().unwrap(), vec![1]);
-        let peer3 = Peer::new("127.0.0.1:3".parse().unwrap(), vec![2]);
-
-        peers.add(peer1.clone());
-        peers.add(peer2.clone());
-        peers.add(peer3.clone());
-
-        // (name, peer, index, self, other)
-        let to_insert = vec![
-            ("a0".to_string(), "".to_string(), "".to_string()),
-            ("b0".to_string(), "".to_string(), "".to_string()),
-            ("c0".to_string(), "".to_string(), "".to_string()),
-            ("b1".to_string(), "a0".to_string(), "".to_string()),
-            ("c1".to_string(), "".to_string(), "".to_string()),
-            ("c2".to_string(), "b1".to_string(), "".to_string()),
-            ("a1".to_string(), "".to_string(), "".to_string()),
-            ("a2".to_string(), "c2".to_string(), "".to_string()),
-            ("b2".to_string(), "".to_string(), "".to_string()),
-            ("b3".to_string(), "a2".to_string(), "".to_string()),
-            ("b4".to_string(), "".to_string(), "".to_string()),
-        ];
-
-        let (hg, indexes, _) = insert_events(to_insert, peers);
-
-        let assert_witness = |hash: &str, res: bool| {
-            assert_eq!(
-                hg.clone().is_witness(indexes.get(hash).unwrap().clone()),
-                res
-            );
-        };
-
-        let assert_strongly_see = |hash1: &str, hash2: &str, res: bool| {
-            assert_eq!(
-                hg.clone().strongly_see(
-                    indexes.get(hash1).unwrap().clone(),
-                    indexes.get(hash2).unwrap().clone()
-                ),
-                res
-            );
-        };
-
-        let assert_round = |hash: &str, res: u64| {
-            assert_eq!(
-                hg.events
-                    .get_event(indexes.get(hash).unwrap().clone().hash)
-                    .unwrap()
-                    .round,
-                res
-            );
-        };
-
-        let assert_first_decendant = |hash1: &str, hash2: &str, res: &str| {
-            let ev1 = hg
-                .clone()
-                .events
-                .get_event(indexes.get(hash1).unwrap().clone().hash)
-                .unwrap();
-
-            let ev2 = hg
-                .clone()
-                .events
-                .get_event(indexes.get(hash2).unwrap().clone().hash)
-                .unwrap();
-
-            let ev_res = hg
-                .clone()
-                .events
-                .get_event(indexes.get(res).unwrap().clone().hash)
-                .unwrap();
-
-            assert_eq!(
-                hg.clone().get_first_decendant(ev1, ev2).unwrap().hash,
-                ev_res.hash
-            );
-        };
-
-        // witness
-
-        assert_witness("a0", true);
-        assert_witness("b0", true);
-        assert_witness("c0", true);
-        assert_witness("a1", false);
-        assert_witness("b1", false);
-        assert_witness("c1", false);
-        assert_witness("b3", true);
-
-        // strongly see
-
-        assert_strongly_see("b3", "a0", true);
-        assert_strongly_see("b3", "b0", true);
-        assert_strongly_see("b3", "c0", true);
-
-        // rounds
-
-        assert_round("a0", 1);
-        assert_round("b0", 1);
-        assert_round("c0", 1);
-        assert_round("a1", 1);
-        assert_round("b1", 1);
-        assert_round("c1", 1);
-        assert_round("b3", 2);
-        assert_round("b4", 2);
-
-        assert_first_decendant("a1", "b3", "a2");
-    }
-
-    /*
-                      Round 5
-    		|   |   c9
-    		|   | / |
-    		|   b9  |
-    ------- |  /|   | --------------------------------
-    		a9  |   | Round 4
-    		| \ |   |
-    		|   \   |
-    		|   | \ |
-    		|   |   c8
-    		|   | / |
-    		|   b8  |
-    		| / |   |
-    		a8  |   c7
-    		| \ | / |
-    		|   b7  |
-    ------- |  /|   | --------------------------------
-    		a7  |   | Round 3
-    		| \ |   |
-    		|   \   |
-    		|   | \ |
-    	    |   |   c6
-    		|   | / |
-    		|   b6  |
-    		| / |   |
-    		a6  |   c5
-    		| \ | / |
-    		|   b5  |
-    ------- |  /|   | -------------------------------
-    		a5  |   |  Round 2           
-    		|   |   |                    
-    		a4  |   |                    
-    		| \ |   |                    
-    		|   \   |                    
-    		|   | \ |
-    	--- a3  |   c4 //a3's other-parent is c1. This situation can happen with concurrency
-    	|	|   | / |
-    	|	|   b4  |
-    	|	| / |   |
-    	|	a2  |   c3
-    	|	| \ | / |
-    	|	|   b3  |
-    	|	|   |   |
-    	|	|   b2  |
-    ----| --|  /|   | ------------------------------
-    	|	a1  |   |  Round 1          
-    	|	| \ |   |                   
-    	|	|   \   |                   
-    	|	|   | \ |                   
-    	|   |   |   c2                  
-    	|	|   |   |
-    	----------  c1
-    		|   | / |
-    		|   b1  |
-    	    | / |   |
-    		a0  b0  c0
-    		0   1    2
-    */
-    #[test]
-    fn consensus_test() {
-        let mut peers = Peers::new();
-
-        let peer1 = Peer::new("127.0.0.1:1".parse().unwrap(), vec![0]);
-        let peer2 = Peer::new("127.0.0.1:2".parse().unwrap(), vec![1]);
-        let peer3 = Peer::new("127.0.0.1:3".parse().unwrap(), vec![2]);
-
-        peers.add(peer1.clone());
-        peers.add(peer2.clone());
-        peers.add(peer3.clone());
-
-        // (name, other_parent)
-        let to_insert = vec![
-            ("a0".to_string(), "".to_string(), "".to_string()),
-            ("b0".to_string(), "".to_string(), "".to_string()),
-            ("c0".to_string(), "".to_string(), "".to_string()),
-            ("b1".to_string(), "a0".to_string(), "".to_string()),
-            ("c1".to_string(), "b1".to_string(), "c1".to_string()),
-            ("c2".to_string(), "".to_string(), "".to_string()),
-            ("a1".to_string(), "c2".to_string(), "".to_string()),
-            ("b2".to_string(), "a1".to_string(), "".to_string()),
-            ("b3".to_string(), "".to_string(), "b3".to_string()),
-            ("c3".to_string(), "b3".to_string(), "".to_string()),
-            ("a2".to_string(), "b3".to_string(), "".to_string()),
-            ("b4".to_string(), "a2".to_string(), "".to_string()),
-            ("c4".to_string(), "b4".to_string(), "".to_string()),
-            ("a3".to_string(), "c1".to_string(), "".to_string()),
-            ("a4".to_string(), "c4".to_string(), "".to_string()),
-            ("a5".to_string(), "".to_string(), "a5".to_string()),
-            ("b5".to_string(), "a5".to_string(), "".to_string()),
-            ("a6".to_string(), "b5".to_string(), "b6".to_string()),
-            ("c5".to_string(), "b5".to_string(), "".to_string()),
-            ("b6".to_string(), "a6".to_string(), "".to_string()),
-            ("c6".to_string(), "b6".to_string(), "".to_string()),
-            ("a7".to_string(), "c6".to_string(), "a7".to_string()),
-            ("b7".to_string(), "a7".to_string(), "".to_string()),
-            ("c7".to_string(), "b7".to_string(), "".to_string()),
-            ("a8".to_string(), "b7".to_string(), "".to_string()),
-            ("b8".to_string(), "a8".to_string(), "".to_string()),
-            ("c8".to_string(), "b8".to_string(), "".to_string()),
-            ("a9".to_string(), "c8".to_string(), "".to_string()),
-            ("b9".to_string(), "a9".to_string(), "".to_string()),
-            ("c9".to_string(), "b9".to_string(), "".to_string()),
-        ];
-
-        let (hg, indexes, _) = insert_events(to_insert, peers);
-
-        let assert_round = |hash: &str, res: u64| {
-            assert_eq!(
-                hg.events
-                    .get_event(indexes.get(hash).unwrap().clone().hash)
-                    .unwrap()
-                    .round,
-                res
-            );
-        };
-
-        let assert_famous = |r: u64, hash: &str, res: super::FamousType| {
-            let round = hg.rounds[(r - 1) as usize].read().unwrap();
-
-            assert_eq!(
-                round
-                    .witnesses
-                    .get(&indexes.get(hash).unwrap().clone().hash)
-                    .unwrap()
-                    .read()
-                    .unwrap()
-                    .famous,
-                res
-            );
-        };
-
-        let assert_see = |hash1: &str, hash2: &str, res: bool| {
-            assert_eq!(
-                hg.clone().see(
-                    indexes.get(hash1).unwrap().clone(),
-                    indexes.get(hash2).unwrap().clone()
-                ),
-                res
-            );
-        };
-
-        // Rounds
-
-        let rounds: Vec<(&str, u64)> = vec![
-            ("a0", 1),
-            ("b0", 1),
-            ("c0", 1),
-            ("b1", 1),
-            ("c1", 1),
-            ("c2", 1),
-            ("a1", 1),
-            ("b2", 2),
-            ("b3", 2),
-            ("a2", 2),
-            ("c3", 2),
-            ("b4", 2),
-            ("a3", 2),
-            ("c4", 2),
-            ("a4", 2),
-            ("a5", 2),
-            ("b5", 3),
-            ("a6", 3),
-            ("c5", 3),
-            ("b6", 3),
-            ("c6", 3),
-            ("a7", 3),
-            ("b7", 4),
-            ("a8", 4),
-            ("c7", 4),
-            ("b8", 4),
-            ("c8", 4),
-            ("a9", 4),
-            ("b9", 5),
-            ("c9", 5),
-        ];
-
-        for (hash, round) in rounds.iter() {
-            assert_round(hash, round.clone());
+        for peer_events in frame.events.values_mut().next().unwrap().1.values_mut() {
+            peer_events.iter_mut().next().unwrap().1.self_parent = 0;
         }
 
-        // Fame
+        // res.events = to_add;
+        // res.peers = self
+        //     .rounds
+        //     .read()
+        //     .unwrap()
+        //     .iter()
+        //     .skip_while(|(id, _)| id < &&bound)
+        //     .take_while(|(id, _)| id <= &&rounds_len)
+        //     .map(|(id, round)| (id.clone(), round.peers.clone()))
+        //     .collect();
 
-        assert_see("b2", "a0", true);
-        assert_see("b2", "b0", true);
-        assert_see("b2", "c0", true);
-
-        assert_see("a2", "a0", true);
-        assert_see("a2", "b0", true);
-        assert_see("a2", "c0", true);
-
-        assert_see("c3", "a0", true);
-        assert_see("c3", "b0", true);
-        assert_see("c3", "c0", true);
-
-        assert_see("b5", "b2", true);
-        assert_see("b5", "b2", true);
-        assert_see("b5", "b2", true);
-        assert_see("a6", "b2", true);
-        assert_see("a6", "b2", true);
-        assert_see("a6", "b2", true);
-        assert_see("c5", "b2", true);
-        assert_see("c5", "b2", true);
-        assert_see("c5", "b2", true);
-
-        assert_see("c0", "b6", false);
-
-        let famous: Vec<(&str, u64, FamousType)> = vec![
-            ("a0", 1, FamousType::True),
-            ("b0", 1, FamousType::True),
-            ("c0", 1, FamousType::True),
-            ("b2", 2, FamousType::True),
-            ("a2", 2, FamousType::True),
-            ("c3", 2, FamousType::True),
-            ("b5", 3, FamousType::True),
-            ("a6", 3, FamousType::True),
-            ("c5", 3, FamousType::True),
-        ];
-
-        for (hash, r, val) in famous {
-            assert_famous(r, hash, val);
-        }
-
-        let undecideds = vec![
-            "b5", "b6", "b7", "b8", "b9", "a6", "a7", "a8", "a9", "c5", "c6", "c7", "c8", "c9",
-        ];
-
-        //TODO: check that every undecided is in the hg.events.undecided
-
-        assert_eq!(hg.events.undecided.len(), undecideds.len());
-
-        let decided = vec![7, 9, 0, 0, 0];
-
-        for (round, &count) in decided.iter().enumerate() {
-            assert_eq!(
-                hg.rounds[round]
-                    .read()
-                    .unwrap()
-                    .events
-                    .iter()
-                    .filter(|(_, val)| val.read().unwrap().received > 0)
-                    .count(),
-                count,
-            );
-        }
-
-        // TODO check the round received
-
-        assert_eq!(hg.transactions[0], "c1".to_string().into_bytes());
-        assert_eq!(hg.transactions[1], "b3".to_string().into_bytes());
-        assert_eq!(hg.transactions[2], "a5".to_string().into_bytes());
+        frame
     }
 }

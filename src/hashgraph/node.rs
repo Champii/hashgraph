@@ -1,3 +1,5 @@
+use rsrpc::TcpTransport;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
@@ -10,6 +12,7 @@ use internal_txs::{PeerTx, PeerTxType};
 use key::Key;
 use peer::Peer;
 use peers::Peers;
+use round::Round;
 use rpc::HgRpc;
 
 #[derive(Clone, Debug)]
@@ -34,8 +37,6 @@ pub struct Node {
     key: Key,
     pub config: NodeConfig,
     pub peers: Arc<RwLock<Peers>>,
-    // hg: Arc<Mutex<Hashgraph>>,
-    // pub tx_channel: Receiver<Vec<u8>>,
     pub tx_channel: Option<Arc<Mutex<Sender<Vec<u8>>>>>,
     pub peer_channel: Option<Arc<Mutex<Sender<PeerTx>>>>,
 }
@@ -54,8 +55,6 @@ impl Node {
             key,
             config,
             peers: peers.clone(),
-            // hg: Arc::new(Mutex::new(Hashgraph::new(peers, sender))),
-            // tx_channel: receiver,
             tx_channel: None,
             peer_channel: None,
         }
@@ -71,42 +70,25 @@ impl Node {
 
         let mut local_self = self.clone();
 
+        let syncing = Arc::new(RwLock::new(true));
+        let syncing2 = syncing.clone();
+
         thread::spawn(move || {
+            let self_peer = Peer::new(local_self.config.listen_addr, local_self.key.get_pub());
+
+            local_self.peers.write().unwrap().self_id = self_peer.id;
+
             let hg = Arc::new(RwLock::new(Hashgraph::new(
-                local_self.peers.clone(),
+                // local_self.peers.clone(),
                 Arc::new(Mutex::new(tx_out)),
             )));
 
-            let self_peer = Peer::new(local_self.config.listen_addr, local_self.key.get_pub());
-
-            local_self
-                .peers
-                .write()
-                .unwrap()
-                .add_self(self_peer.clone());
-
-            let server = HgRpc::Duplex::listen(&local_self.config.listen_addr.to_string());
-
-            {
-                let mut guard = server.context.lock().unwrap();
-                (*guard).node = Arc::new(RwLock::new(local_self.clone()));
-                (*guard).hg = hg.clone();
-                (*guard).peers = local_self.peers.clone();
-            }
-
-            // Add self root
-            hg.write().unwrap().insert_event(Event::new(
-                0,
-                local_self.peers.read().unwrap().self_id,
-                0,
-                0,
-                vec![],
-                vec![],
-            ));
-
-            //
             let hg2 = hg.clone();
             thread::spawn(move || loop {
+                if *syncing2.read().unwrap() {
+                    continue;
+                }
+
                 let tx = tx_in_receiver.recv();
 
                 hg2.write().unwrap().add_self_event(tx.unwrap(), vec![]);
@@ -115,24 +97,188 @@ impl Node {
             let hg3 = hg.clone();
             thread::spawn(move || loop {
                 let tx = peer_in_receiver.recv();
+                // let mut is_bootstrap = false;
+
+                // {
+                //     let mut hg = hg3.write().unwrap();
+
+                //     let mut last = hg.rounds[hg.rounds.len() - 1].write().unwrap();
+
+                //     if last.peers.len() == 1 {
+                //         warn!("BOOTSTRAP ADD");
+                //         is_bootstrap = true;
+
+                //         last.peers.add(tx.clone().unwrap().peer);
+                //     }
+                // }
 
                 hg3.write()
                     .unwrap()
                     .add_self_event(vec![], vec![tx.unwrap()]);
+
+                // if is_bootstrap {
+                //     // force consensus
+                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
+                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
+                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
+                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
+                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
+                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
+                // }
             });
 
             if let Some(addr) = local_self.config.connect_addr {
-                let mut client = HgRpc::Duplex::connect(&addr.to_string());
+                *syncing.write().unwrap() = true;
 
-                let peers = client.ask_join(self_peer).unwrap().unwrap();
+                Node::sync(hg.clone(), addr, self_peer);
+            } else {
+                local_self
+                    .peers
+                    .write()
+                    .unwrap()
+                    .add_self(self_peer.clone());
 
-                local_self.peers.write().unwrap().merge(peers);
+                hg.write()
+                    .unwrap()
+                    .bootstrap(local_self.peers.read().unwrap().clone());
+
+                // bootstrap node, we add the peer_tx on the root
+                hg.write().unwrap().insert_event(Event::new(
+                    0,
+                    self_peer.id,
+                    0,
+                    0,
+                    vec![],
+                    vec![PeerTx::new_join(self_peer.clone())],
+                ));
             }
 
-            thread::spawn(move || local_self.gossip(hg));
+            *syncing.write().unwrap() = false;
+
+            let server = HgRpc::listen_tcp(&local_self.config.listen_addr.to_string());
+
+            {
+                let mut guard = server.context.lock().unwrap();
+                (*guard).node = Arc::new(RwLock::new(local_self.clone()));
+                (*guard).hg = hg.clone();
+                (*guard).peers = local_self.peers.clone();
+            }
+
+            local_self.gossip(hg);
         });
 
         tx_out_receiver
+    }
+
+    fn sync(hg: Arc<RwLock<Hashgraph>>, addr: SocketAddr, self_peer: Peer) {
+        let mut client = HgRpc::connect_tcp(&addr.to_string()).unwrap();
+
+        client.ask_join(self_peer.clone()).unwrap().unwrap();
+
+        info!("Syncing");
+
+        let mut frame;
+
+        loop {
+            let res = client.fast_sync(self_peer.id);
+
+            if let Err(err) = res {
+                error!("{:?}", err);
+
+                client.close();
+
+                return;
+            }
+
+            frame = res.unwrap().unwrap();
+
+            if frame.events.len() == 0 {
+                debug!("Waiting for acceptation");
+
+                thread::sleep(time::Duration::from_millis(1000));
+            } else {
+                break;
+            }
+        }
+        warn!("SYNC {:?}", frame);
+
+        // let frame = frame.unwrap().unwrap();
+
+        let mut hg = hg.write().unwrap();
+
+        for (round_id, round_events) in frame.clone().events {
+            // let mut events = events.clone();
+
+            // let mut events: Vec<Event> = events.values().cloned().collect();
+
+            // events.sort_by(|e1, e2| e1.id.cmp(&e2.id));
+
+            hg.rounds
+                .write()
+                .unwrap()
+                .entry(round_id)
+                .or_insert_with(|| {
+                    let mut round = Round::new(round_id);
+
+                    round.peers = round_events.0.clone();
+
+                    round.peers.self_id = self_peer.id;
+
+                    round
+                });
+
+            for (_, events) in round_events.1 {
+                for (_, event) in events {
+                    hg.insert_event(event.clone());
+                }
+            }
+        }
+
+        // trace!("Events from pull {:?}", events.clone());
+
+        // let events_diff = hg.write().unwrap().merge_events(0, 0, events.clone());
+
+        // if !events.has_more {
+        //     break;
+        // }
+        // }
+
+        // loop {
+        //     let known = hg.read().unwrap().events.known_events();
+
+        //     let pull_res = client.pull(known);
+
+        //     if let Err(err) = pull_res {
+        //         error!("{:?}", err);
+
+        //         client.close();
+
+        //         continue;
+        //     }
+
+        //     let events = pull_res.unwrap().unwrap();
+
+        //     trace!("Events from pull {:?}", events.clone());
+
+        //     let events_diff = hg.write().unwrap().merge_events(0, 0, events.clone());
+
+        //     if !events.has_more {
+        //         break;
+        //     }
+        // }
+
+        client.close();
+
+        info!("Synced");
+
+        hg.insert_event(Event::new(
+            0,
+            self_peer.id,
+            0,
+            0,
+            vec![self_peer.id.to_string().into_bytes()],
+            vec![],
+        ));
     }
 
     pub fn peer_join(&mut self, peer: Peer) {
@@ -160,69 +306,103 @@ impl Node {
     }
 
     pub fn gossip(&mut self, _hg: Arc<RwLock<Hashgraph>>) {
-        loop {
-            thread::sleep(time::Duration::from_millis(1000));
+        let mut clients: HashMap<u64, HgRpc::Client<rsrpc::TcpTransport>> = HashMap::new();
 
-            let peer = match self.peers.read().unwrap().clone().get_random() {
+        loop {
+            // thread::sleep(time::Duration::from_millis(10));
+
+            // warn!(
+            //     "PEERS NB {}",
+            //     _hg.read().unwrap().get_last_decided_peers().len()
+            // );
+
+            let peer = match _hg.read().unwrap().get_last_decided_peers().get_random() {
                 Some(p) => p,
-                None => continue,
+                None => {
+                    thread::sleep(time::Duration::from_millis(1000));
+
+                    continue;
+                }
             };
 
-            let self_id = self.peers.read().unwrap().self_id;
+            let mut client = {
+                let client = clients.get(&peer.id);
+
+                if client.is_some() {
+                    client.unwrap().clone()
+                } else {
+                    let c = HgRpc::connect_tcp(&peer.address.to_string());
+
+                    if let Err(e) = c {
+                        // error!("Error connect: {}", e);
+
+                        continue;
+                    }
+
+                    c.unwrap()
+                }
+            };
+
+            let self_id = _hg.read().unwrap().get_last_decided_peers().self_id;
 
             let hg = _hg.clone();
 
-            thread::spawn(move || {
-                let now = SystemTime::now();
+            // thread::spawn(move || {
+            let now = SystemTime::now();
 
-                let mut client = HgRpc::Duplex::connect(&peer.address.to_string());
+            // let events_diff = {
+            //     let mut hg2 = hg.write().unwrap();
 
-                // let events_diff = {
-                //     let mut hg2 = hg.write().unwrap();
+            //     let known = hg2.events.known_events();
 
-                //     let known = hg2.events.known_events();
+            //     let pull_res = client.pull(known);
 
-                //     let pull_res = client.pull(known);
+            //     if let Err(err) = pull_res {
+            //         error!("{:?}", err);
 
-                //     if let Err(err) = pull_res {
-                //         error!("{:?}", err);
+            //         return;
+            //     }
 
-                //         continue;
-                //     }
+            //     let events = pull_res.unwrap().unwrap();
 
-                //     let events = pull_res.unwrap().unwrap();
+            //     trace!("Events from pull {:?}", events.clone());
 
-                //     trace!("Events from pull {:?}", events.clone());
+            //     hg2.merge_events(self_id, peer.id, events)
+            // };
 
-                //     let self_id = self.peers.read().unwrap().self_id;
+            let known = hg.read().unwrap().events.known_events();
 
-                //     let events_diff = hg2.merge_events(self_id, peer.id, events);
+            let pull_res = client.pull(known);
+            // thread::spawn(move || {
+            if let Err(err) = pull_res {
+                error!("{:?}", err);
 
-                //     events_diff
-                // };
+                client.close();
 
-                let known = hg.read().unwrap().events.known_events();
+                clients.remove(&peer.id);
 
-                let pull_res = client.pull(known);
+                continue;
+            }
 
-                if let Err(err) = pull_res {
-                    error!("{:?}", err);
+            let events = pull_res.unwrap().unwrap();
 
-                    return;
-                }
+            trace!("Events from pull {:?}", events.clone());
 
-                let events = pull_res.unwrap().unwrap();
+            let events_diff = hg.write().unwrap().merge_events(self_id, peer.id, events);
 
-                trace!("Events from pull {:?}", events.clone());
+            if events_diff.is_err() {
+                continue;
+            }
 
-                let events_diff = hg.write().unwrap().merge_events(self_id, peer.id, events);
+            trace!("Events to push {:?}", events_diff.clone());
 
-                trace!("Events to push {:?}", events_diff.clone());
+            client.push(events_diff.unwrap());
 
-                client.push(events_diff);
+            debug!("Gossip Time: {:?}", now.elapsed());
 
-                debug!("Gossip Time: {:?}", now.elapsed());
-            });
+            // client.close();
+            // });
+            // });
         }
     }
 }

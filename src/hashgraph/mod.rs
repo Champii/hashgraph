@@ -20,6 +20,7 @@ extern crate untrusted;
 mod event;
 mod events;
 mod hashgraph;
+mod hashgraph_tests;
 mod internal_txs;
 mod key;
 pub mod logger;

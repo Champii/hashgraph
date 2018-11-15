@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use super::event::{Event, EventHash};
+use super::peers::Peers;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FamousType {
@@ -38,6 +39,8 @@ pub struct Round {
     pub id: u64,
     pub events: HashMap<EventHash, Arc<RwLock<RoundEvent>>>,
     pub witnesses: HashMap<EventHash, Arc<RwLock<RoundEvent>>>,
+    pub peers: Peers,
+    pub decided: bool,
 }
 
 impl Round {
@@ -46,6 +49,8 @@ impl Round {
             id,
             events: HashMap::new(),
             witnesses: HashMap::new(),
+            peers: Peers::new(),
+            decided: false,
         }
     }
 

@@ -1,5 +1,5 @@
 use rand;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use super::peer::Peer;
@@ -8,7 +8,8 @@ use super::peer::Peer;
 pub struct Peers {
     pub self_id: u64,
     pub super_majority: u64,
-    peers: HashMap<u64, Peer>,
+    peers: BTreeMap<u64, Peer>,
+    last_peer: u64,
 }
 
 impl Peers {
@@ -16,7 +17,8 @@ impl Peers {
         Peers {
             self_id: 0,
             super_majority: 0,
-            peers: HashMap::new(),
+            peers: BTreeMap::new(),
+            last_peer: 0,
         }
     }
 
@@ -64,26 +66,38 @@ impl Peers {
         }
     }
 
-    pub fn get_random(self) -> Option<Peer> {
+    pub fn get_random(&mut self) -> Option<Peer> {
         if self.peers.len() <= 1 {
             warn!("Waiting for peers...");
 
             return None;
         }
 
-        let other_peers = self.peers_without_self();
+        let other_peers = self.peers_without(&self.self_id);
 
-        let peer_id = rand::random::<u8>() % (other_peers.len() as u8);
+        let peers_without_last = if self.peers.len() > 2 {
+            if self.last_peer != 0 {
+                self.peers_without(&self.last_peer)
+            } else {
+                other_peers
+            }
+        } else {
+            other_peers
+        };
 
-        let peers_vec: Vec<(&u64, &Peer)> = other_peers.iter().collect();
+        let peer_id = rand::random::<u64>() % (peers_without_last.len() as u64);
+
+        self.last_peer = peer_id;
+
+        let peers_vec: Vec<(&u64, &Peer)> = peers_without_last.iter().collect();
 
         Some(peers_vec[peer_id as usize].1.clone())
     }
 
-    fn peers_without_self(self) -> HashMap<u64, Peer> {
+    fn peers_without(&self, id: &u64) -> BTreeMap<u64, Peer> {
         let mut res = self.peers.clone();
 
-        res.remove(&self.self_id);
+        res.remove(id);
 
         res
     }
@@ -96,5 +110,9 @@ impl Peers {
         for (_, peer) in peers.peers {
             self.add(peer);
         }
+    }
+
+    pub fn get_peers(self) -> BTreeMap<u64, Peer> {
+        self.peers.clone()
     }
 }

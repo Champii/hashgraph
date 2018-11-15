@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use super::event::EventCreator;
-use super::events::EventsDiff;
+use super::events::{EventsDiff, Frame};
 use super::hashgraph::Hashgraph;
+use super::internal_txs::PeerTx;
 use super::node::Node;
 use super::peer::Peer;
 use super::peers::Peers;
@@ -14,43 +15,66 @@ service! {
     let hg: Arc<super::RwLock<super::Hashgraph>>;
     let peers: Arc<super::RwLock<super::Peers>>;
 
+    fn fast_sync(&mut self, peer_id: u64) -> super::Frame {
+      self.hg.read().unwrap().get_last_frame(peer_id)
+    }
+
     fn pull(&mut self, known: super::HashMap<super::EventCreator, u64>) -> super::EventsDiff {
-      let hg = self.hg.write().unwrap();
-
-      if let None = self.peers.read().unwrap().get_by_socket_addr(self.actual_sender.clone()) {
-        warn!("Unknown peer tries to pull {}", self.actual_sender.clone());
-
-        return super::EventsDiff::default();
-      }
-
       trace!("Got events to pull {:?}", known);
 
-      hg.events.events_diff(known)
+      self.hg.read().unwrap().events.events_diff(known, 8)
     }
 
     fn push(&mut self, events: super::EventsDiff) -> bool {
-      let mut hg = self.hg.write().unwrap();
+      let peers = self.hg.read().unwrap().get_last_decided_peers();
 
-      if let None = self.peers.read().unwrap().get_by_socket_addr(self.actual_sender.clone()) {
-        warn!("Unknown peer tries to push {}", self.actual_sender.clone());
+      let self_id = peers.clone().self_id;
+      let peer = peers.clone().get_by_id(events.sender_id);
 
-        return false;
-      }
+      let id = if let Some(p) = peer {
+        p.id
+      } else {
+        warn!("UNKNOWN PEER, {:?}", events.sender_id);
+        0
+      };
 
       trace!("Got events to push {:?}", events);
-      let self_id = self.peers.read().unwrap().self_id;
-      let peer_id = self.peers.read().unwrap().get_by_socket_addr(self.actual_sender).unwrap().id;
 
-      hg.merge_events(self_id, peer_id, events);
+      self.hg.write().unwrap().merge_events(self_id, id, events);
 
       true
     }
 
     // you are asked to add a new peer. Answer with own pub_key
-    fn ask_join(&mut self, peer: super::Peer) -> super::Peers {
+    fn ask_join(&mut self, peer: super::Peer) -> bool{
+
+      if self.hg.read().unwrap().get_last_decided_peers().len() == 1 {
+          error!("HERE CA FOURE");
+          let mut  hg = self.hg.write().unwrap();
+
+          // {
+          //   let rounds_len = hg.rounds.len();
+          //   let mut rounds = hg.rounds.clone();
+          //   let mut peers = &mut rounds.values().last().unwrap().write().unwrap().peers;
+
+          //   peers.add(peer.clone());
+          // }
+
+          hg.add_self_event(vec![], vec![super::PeerTx::new_join(peer)]);
+
+          hg.add_self_event(vec![], vec![]);
+          hg.add_self_event(vec![], vec![]);
+          hg.add_self_event(vec![], vec![]);
+          hg.add_self_event(vec![], vec![]);
+          hg.add_self_event(vec![], vec![]);
+          hg.add_self_event(vec![], vec![]);
+
+          return true;
+      }
+
       self.node.write().unwrap().peer_join(peer);
 
-      self.peers.read().unwrap().clone()
+      true
     }
   }
 }
