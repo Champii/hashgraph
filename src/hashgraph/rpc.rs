@@ -22,7 +22,7 @@ service! {
     fn pull(&mut self, known: super::HashMap<super::EventCreator, u64>) -> super::EventsDiff {
       trace!("RPC: Got events to pull {:?}", known);
 
-      self.hg.read().unwrap().events.events_diff(known, 8)
+      self.hg.read().unwrap().events.events_diff(known, 16)
     }
 
     fn push(&mut self, events: super::EventsDiff) -> bool {

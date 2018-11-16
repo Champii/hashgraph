@@ -45,6 +45,18 @@ impl Peers {
         self.super_majority = (2 * self.peers.len() / 3 + 1) as u64;
     }
 
+    pub fn remove(&mut self, peer: Peer) {
+        if self.peers.get(&peer.id).is_none() {
+            return;
+        }
+
+        self.peers.remove(&peer.id);
+
+        info!("Remove peer -> {} Nb: {}", peer.clone(), self.peers.len(),);
+
+        self.super_majority = (2 * self.peers.len() / 3 + 1) as u64;
+    }
+
     pub fn get_by_id(self, id: u64) -> Option<Peer> {
         match self.peers.get(&id) {
             Some(peer) => Some(peer.clone()),

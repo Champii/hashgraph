@@ -234,6 +234,18 @@ impl Node {
         });
     }
 
+    pub fn peer_leave(&mut self, peer: Peer) {
+        self.peer_channel.clone().map(|mutex| {
+            mutex
+                .lock()
+                .unwrap()
+                .send(PeerTx::new(PeerTxType::Leave, peer))
+                .unwrap();
+
+            mutex
+        });
+    }
+
     pub fn add_tx(&mut self, tx: Vec<u8>) {
         self.tx_channel.clone().map(|mutex| {
             mutex.lock().unwrap().send(tx).unwrap();
@@ -248,6 +260,7 @@ impl Node {
 
     pub fn gossip(&mut self, _hg: Arc<RwLock<Hashgraph>>) {
         let mut clients: HashMap<u64, HgRpc::Client<rsrpc::TcpTransport>> = HashMap::new();
+        let mut last_seen: HashMap<u64, SystemTime> = HashMap::new();
 
         loop {
             let peer = match _hg.read().unwrap().get_last_decided_peers().get_random() {
@@ -272,6 +285,12 @@ impl Node {
                     if let Err(e) = c {
                         debug!("Error connect: {:?} {}", peer.address, e);
                         // send leave tx
+
+                        let seen = last_seen.entry(peer.id).or_insert(SystemTime::now());
+
+                        if seen.elapsed().unwrap() > time::Duration::from_millis(1000) {
+                            self.peer_leave(peer.clone());
+                        }
 
                         continue;
                     }
@@ -325,6 +344,8 @@ impl Node {
             );
 
             client.push(events_diff);
+
+            last_seen.entry(peer.id).or_insert(SystemTime::now());
         }
     }
 }

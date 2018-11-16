@@ -481,7 +481,6 @@ impl Hashgraph {
         //     }
         // }
 
-        error!("NO ROUND FOUND");
         self.rounds.values().last().unwrap().clone()
     }
 
@@ -763,6 +762,15 @@ impl Hashgraph {
                                         .unwrap()
                                         .peers
                                         .add(item.peer.clone());
+                                }
+                            }
+                            if item.tx_type == PeerTxType::Leave {
+                                for round in rounds_to_modify.clone() {
+                                    self.rounds
+                                        .get_mut(&round)
+                                        .unwrap()
+                                        .peers
+                                        .remove(item.peer.clone());
                                 }
                             }
                             // TODO: remove peer
