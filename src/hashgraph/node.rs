@@ -1,4 +1,3 @@
-use rsrpc::TcpTransport;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -179,8 +178,6 @@ impl Node {
 
         trace_time!("Sync");
 
-        let now = SystemTime::now();
-
         let mut hg = hg.write().unwrap();
 
         let mut nb_events = 0;
@@ -212,14 +209,7 @@ impl Node {
 
         info!("Synced: Events {}, Peers {}", nb_events, nb_peers);
 
-        hg.insert_event(Event::new(
-            0,
-            self_peer.id,
-            0,
-            0,
-            vec![self_peer.id.to_string().into_bytes()],
-            vec![],
-        ));
+        hg.insert_event(Event::new(0, self_peer.id, 0, 0, vec![], vec![]));
     }
 
     pub fn peer_join(&mut self, peer: Peer) {
@@ -307,8 +297,6 @@ impl Node {
 
             let hg = _hg.clone();
 
-            let now = SystemTime::now();
-
             let known = hg.read().unwrap().events.known_events();
 
             let pull_res = client.pull(known);
@@ -343,7 +331,15 @@ impl Node {
                 events_diff.diff.iter().fold(0, |c, v| c + v.1.len())
             );
 
-            client.push(events_diff);
+            if let Err(e) = client.push(events_diff) {
+                error!("{:?}", e);
+
+                client.close();
+
+                clients.remove(&peer.id);
+
+                continue;
+            }
 
             last_seen.entry(peer.id).or_insert(SystemTime::now());
         }

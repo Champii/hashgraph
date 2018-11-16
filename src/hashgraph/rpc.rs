@@ -44,7 +44,7 @@ service! {
       };
 
 
-      self.hg.write().unwrap().merge_events(self_id, id, events);
+      self.hg.write().unwrap().merge_events(self_id, id, events).unwrap();
 
       true
     }

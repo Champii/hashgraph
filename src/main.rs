@@ -1,18 +1,11 @@
-#![feature(
-  async_await,
-  await_macro,
-  pin,
-  arbitrary_self_types,
-  futures_api
-)]
+#![feature(async_await, await_macro, pin, arbitrary_self_types, futures_api)]
 
 extern crate clap;
 extern crate hashgraph;
-extern crate log;
+extern crate logger;
 
 mod args;
 
-use hashgraph::logger;
 use hashgraph::Key;
 use hashgraph::Node;
 

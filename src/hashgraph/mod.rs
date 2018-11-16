@@ -12,7 +12,7 @@ extern crate log;
 extern crate scopeguard;
 
 extern crate bincode;
-extern crate env_logger;
+// extern crate env_logger;
 extern crate rand;
 extern crate ring;
 extern crate serde;
@@ -25,7 +25,7 @@ mod hashgraph;
 mod hashgraph_tests;
 mod internal_txs;
 mod key;
-pub mod logger;
+// pub mod logger;
 mod node;
 mod peer;
 mod peers;

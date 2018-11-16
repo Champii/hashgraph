@@ -42,14 +42,16 @@ fn main() {
     - [x] Virtual voting
     - [x] Famous Witness
     - [x] Consensus Timestamp
+    - [ ] Break ties on same Consensus Timestamp (Median timestamp)
     - [ ] Break ties on same Consensus Timestamp (Signature XOR)
     - [x] Transaction submit
     - [x] Consensus Transaction output
-    - [ ] Dynamic participants
-        - [ ] Peer add
-        - [ ] Peer Remove
+    - [x] Dynamic participants
+        - [x] Peer add
+        - [x] Peer Remove
 - [x] Caching for performances
-- [ ] Sync
+- [x] Sync
+- [ ] Event Signature
 - [ ] Implement the PARSEC specification instead of the Swirlds one
 - [ ] Transaction validation
 - [ ] Bad peer removal or punishement

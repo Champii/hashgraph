@@ -26,4 +26,6 @@ env_logger = "0.5.12"
 rand = "0.3"
 scopeguard="0.3.3"
 
-rsrpc = { path = "../rsrpc/" }
+
+logger = { git = "https://github.com/Champii/custom-logger" }
+rsrpc = { git = "https://github.com/Champii/rsrpc" }

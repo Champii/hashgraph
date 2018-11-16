@@ -1,12 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use super::event::{Event, EventCreator, EventHash};
 use super::events::{Events, EventsDiff, Frame};
 use super::internal_txs::{PeerTx, PeerTxType};
-use super::peer::Peer;
 use super::peers::Peers;
 use super::round::{FamousType, Round, RoundEvent};
 use super::trace_time;
@@ -171,7 +170,7 @@ impl Hashgraph {
 
         let mut merged = 0;
 
-        for (hash, events) in other_events.diff {
+        for (_, events) in other_events.diff {
             for event in events.values() {
                 self.insert_event(event.clone());
 
@@ -704,8 +703,6 @@ impl Hashgraph {
 
         self.purge(max_round);
 
-        // process tie here
-
         let txs = timestamped
             .iter()
             .map(|tuple| {
@@ -771,7 +768,6 @@ impl Hashgraph {
                                         .remove(item.peer.clone());
                                 }
                             }
-                            // TODO: remove peer
                         }
                     }
                 }

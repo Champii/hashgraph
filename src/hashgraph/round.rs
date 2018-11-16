@@ -1,6 +1,4 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 
 use super::event::{Event, EventHash};
 use super::peers::Peers;
@@ -38,9 +36,7 @@ impl RoundEvent {
 #[derive(Clone, Default, Debug)]
 pub struct Round {
     pub id: u64,
-    // todo: remove this unecessary arc mutex
     pub events: HashMap<EventHash, RoundEvent>,
-    // todo: remove this unecessary arc mutex
     pub witnesses: Vec<EventHash>,
     pub peers: Peers,
     pub decided: bool,
@@ -74,7 +70,7 @@ impl Round {
     pub fn purge(&mut self) {
         self.events = HashMap::new();
         self.witnesses = vec![];
-        // self.peers = Peers::new();
+        self.peers = Peers::new();
         self.purged = true;
 
         trace!("Round: Purged {}", self.id);
