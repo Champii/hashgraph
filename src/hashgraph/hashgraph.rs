@@ -118,7 +118,7 @@ impl Hashgraph {
             .get_by_id(event.creator)
             .is_none()
         {
-            error!("Error: Insert event: Peer not in the round: {:?}", event);
+            debug!("Error: Insert event: Peer not in the round: {:?}", event);
 
             return false;
         }
@@ -702,9 +702,7 @@ impl Hashgraph {
 
         //
 
-        if max_round > 7 {
-            self.purge(max_round);
-        }
+        self.purge(max_round);
 
         // process tie here
 
@@ -903,6 +901,10 @@ impl Hashgraph {
             for (e_hash, _) in round.events.iter() {
                 let event = self.events.get_event(e_hash).unwrap();
 
+                if round.peers.clone().get_by_id(event.creator).is_none() {
+                    continue;
+                }
+
                 creator_events
                     .entry(event.creator)
                     .or_insert_with(|| BTreeMap::new())
@@ -922,13 +924,17 @@ impl Hashgraph {
     }
 
     pub fn purge(&mut self, max_round: u64) {
+        if max_round <= 5 {
+            return;
+        }
+
         trace_time!("Purge");
 
         let events_to_remove = self
             .rounds
             .iter_mut()
             .rev()
-            .skip_while(|(id, _)| id > &&(max_round - 7))
+            .skip_while(|(id, _)| id > &&(max_round - 5))
             .map(|(_, round)| {
                 if round.purged {
                     return vec![];

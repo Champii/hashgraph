@@ -74,7 +74,7 @@ impl Round {
     pub fn purge(&mut self) {
         self.events = HashMap::new();
         self.witnesses = vec![];
-        self.peers = Peers::new();
+        // self.peers = Peers::new();
         self.purged = true;
 
         trace!("Round: Purged {}", self.id);

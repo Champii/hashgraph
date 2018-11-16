@@ -189,9 +189,25 @@ impl Events {
     }
 
     pub fn purge(&mut self, events: Vec<EventHash>) {
-        for event_hash in events.clone() {
-            self.by_creator.remove(&event_hash);
-            self.by_hash.remove(&event_hash);
+        let events = events
+            .iter()
+            .map(|hash| self.by_hash.get(hash).unwrap().clone())
+            .collect::<Vec<Event>>();
+
+        for event in events.clone() {
+            self.by_creator
+                .get_mut(&event.creator)
+                .unwrap()
+                .remove(&event.id);
+
+            self.by_creator = self
+                .by_creator
+                .iter()
+                .filter(|(_, events)| events.len() > 0)
+                .map(|(id, events)| (id.clone(), events.clone()))
+                .collect();
+
+            self.by_hash.remove(&event.hash);
         }
 
         trace!("Events: Purged {}", events.len());
