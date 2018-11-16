@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 use std::{thread, time};
 
+use super::trace_time;
 use event::Event;
 use hashgraph::Hashgraph;
 use internal_txs::{PeerTx, PeerTxType};
@@ -176,6 +177,8 @@ impl Node {
 
         trace!("Sync: rounds {}", frame.events.len());
 
+        trace_time!("Sync");
+
         let now = SystemTime::now();
 
         let mut hg = hg.write().unwrap();
@@ -204,8 +207,6 @@ impl Node {
                 }
             }
         }
-
-        defer!(trace!("Time: Sync: {:?}", now.elapsed()));
 
         client.close();
 
@@ -258,8 +259,7 @@ impl Node {
                 }
             };
 
-            let now = SystemTime::now();
-            defer!(trace!("Time: Gossip: {:?}", now.elapsed().unwrap()));
+            trace_time!("Gossip");
 
             let mut client = {
                 let client = clients.get(&peer.id);

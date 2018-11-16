@@ -35,3 +35,12 @@ mod rpc;
 pub use key::Key;
 pub use node::{Node, NodeConfig};
 pub use peer::Peer;
+
+#[macro_export]
+macro_rules! trace_time {
+    ($expr:expr) => {
+        let now = SystemTime::now();
+
+        defer!(trace!("Time: {}: {:?}", $expr, now.elapsed().unwrap()));
+    };
+}

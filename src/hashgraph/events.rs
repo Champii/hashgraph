@@ -115,7 +115,6 @@ impl Events {
     pub fn events_diff(&self, other_known: HashMap<EventCreator, u64>, limit: u64) -> EventsDiff {
         let mut res_events = HashMap::new();
         let known = self.known_events();
-        // let mut res_known = HashMap::new();
         let mut has_more = false;
 
         trace!("EventsDiff: Other Known {:?}", other_known);
@@ -149,7 +148,6 @@ impl Events {
                         }
 
                         res_events.insert(peer_id.clone(), to_add);
-                        // res_known.insert(peer_id.clone(), last_known.clone());
                     }
                 }
                 None => {
@@ -167,7 +165,10 @@ impl Events {
             }
         }
 
-        trace!("EventsDiff: Diff {:?}", res_events);
+        trace!(
+            "EventsDiff: Diff {:?}",
+            res_events.iter().fold(0, |c, v| c + v.1.len())
+        );
 
         EventsDiff {
             sender_id: 0,
@@ -185,5 +186,14 @@ impl Events {
 
     pub fn get_event(&self, hash: &EventHash) -> Option<Event> {
         self.by_hash.get(hash).map(|event| event.clone())
+    }
+
+    pub fn purge(&mut self, events: Vec<EventHash>) {
+        for event_hash in events.clone() {
+            self.by_creator.remove(&event_hash);
+            self.by_hash.remove(&event_hash);
+        }
+
+        trace!("Events: Purged {}", events.len());
     }
 }

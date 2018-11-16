@@ -9,6 +9,7 @@ use super::internal_txs::{PeerTx, PeerTxType};
 use super::peer::Peer;
 use super::peers::Peers;
 use super::round::{FamousType, Round, RoundEvent};
+use super::trace_time;
 
 #[derive(Debug, Clone)]
 pub struct Hashgraph {
@@ -98,8 +99,7 @@ impl Hashgraph {
     }
 
     pub fn insert_event(&mut self, event: Event) -> bool {
-        let now = SystemTime::now();
-        defer!(trace!("Time: Insert Event: {:?}", now.elapsed().unwrap()));
+        trace_time!("Insert Event");
 
         let mut event = event.clone();
 
@@ -167,8 +167,7 @@ impl Hashgraph {
         peer_id: u64,
         other_events: EventsDiff,
     ) -> Result<EventsDiff, String> {
-        let now = SystemTime::now();
-        defer!(trace!("Time: Merge Events: {:?}", now.elapsed().unwrap()));
+        trace_time!("Merge Event");
 
         let mut merged = 0;
 
@@ -515,7 +514,7 @@ impl Hashgraph {
             return;
         }
 
-        let now = SystemTime::now();
+        trace_time!("Process Fame");
 
         let prev_round = self.rounds.get(&(e.round - 1)).unwrap().clone();
         // let mut round = self.rounds.get_mut(&e.round).unwrap();
@@ -572,14 +571,12 @@ impl Hashgraph {
             prev_prev_round.events.get_mut(hash).unwrap().famous = is_famous.clone();
         }
 
-        trace!("Time: Process Fame: {:?}", now.elapsed().unwrap());
-
         self.decide_round_received();
     }
 
     pub fn decide_round_received(&mut self) {
         // warn!("DECIDE ROUND");
-        let now = SystemTime::now();
+        trace_time!("Decide Round Received");
 
         let mut decided_events = vec![];
 
@@ -653,16 +650,13 @@ impl Hashgraph {
             self.events.undecided.len()
         );
 
-        trace!("Time: Decide Round: {:?}", now.elapsed().unwrap());
-        // warn!("DECIDED {}", decided_events.len());
-
         if decided_events.len() > 0 {
             self.consensus_order(decided_events);
         }
     }
 
     pub fn consensus_order(&mut self, decided_events: Vec<EventHash>) {
-        let now = SystemTime::now();
+        trace_time!("Consensus Order");
 
         let mut received = decided_events
             .iter()
@@ -691,33 +685,29 @@ impl Hashgraph {
                     .get_mut(&re.hash)
                     .unwrap()
                     .timestamp = t;
-
-                // re.write().unwrap().timestamp = t;
-
-                // self.rounds.write().unwrap().
-
-                // {
-                //     let mut r = r.write().unwrap();
-
-                //     r.decided = true;
-                // }
-
                 (e.clone(), r.clone(), t)
             })
             .collect::<Vec<(Event, Round, u64)>>();
 
         timestamped.sort_by(|(_, _, t1), (_, _, t2)| t1.cmp(t2));
 
-        // process tie here
+        // cleanup old events
+        let max_round = timestamped
+            .clone()
+            .iter()
+            .max_by(|(e1, _, _), (e2, _, _)| e1.round.cmp(&e2.round))
+            .unwrap()
+            .0
+            .round
+            .clone();
 
-        // error!(
-        //     "TIMESTAMPS {:?}",
-        //     timestamped
-        //         .clone()
-        //         .iter()
-        //         .map(|t| t.2)
-        //         .collect::<Vec<u64>>()
-        // );
+        //
+
+        if max_round > 7 {
+            self.purge(max_round);
+        }
+
+        // process tie here
 
         let txs = timestamped
             .iter()
@@ -729,10 +719,6 @@ impl Hashgraph {
                 )
             })
             .collect::<Vec<(Vec<Vec<u8>>, Vec<PeerTx>, Round)>>();
-
-        trace!("Time: Consensus Order: {:?}", now.elapsed().unwrap());
-
-        let now = SystemTime::now();
 
         if txs.len() > 0 {
             for tx in txs.clone() {
@@ -788,8 +774,6 @@ impl Hashgraph {
                 self.internal_transactions.extend(tx.1);
             }
         }
-
-        trace!("Time: Tx Ouptut: {:?}", now.elapsed().unwrap());
     }
 
     pub fn get_consensus_timestamp(&mut self, event: Event, round: &Round) -> u64 {
@@ -891,8 +875,7 @@ impl Hashgraph {
     }
 
     pub fn get_last_frame(&self, peer_id: u64) -> Frame {
-        let now = SystemTime::now();
-        defer!(trace!("Time: Get Last Frame: {:?}", now.elapsed().unwrap()));
+        trace_time!("Get Last Frame");
 
         if self.get_last_decided_peers().get_by_id(peer_id).is_none() {
             return Frame::new();
@@ -927,17 +910,49 @@ impl Hashgraph {
             peer_events.iter_mut().next().unwrap().1.self_parent = 0;
         }
 
-        // res.events = to_add;
-        // res.peers = self
-        //     .rounds
-        //     .read()
-        //     .unwrap()
-        //     .iter()
-        //     .skip_while(|(id, _)| id < &&bound)
-        //     .take_while(|(id, _)| id <= &&rounds_len)
-        //     .map(|(id, round)| (id.clone(), round.peers.clone()))
-        //     .collect();
-
         frame
+    }
+
+    pub fn purge(&mut self, max_round: u64) {
+        trace_time!("Purge");
+
+        let events_to_remove = self
+            .rounds
+            .iter_mut()
+            .rev()
+            .skip_while(|(id, _)| id > &&(max_round - 7))
+            .map(|(_, round)| {
+                if round.purged {
+                    return vec![];
+                }
+
+                let hashes = round.events.keys().cloned().collect::<Vec<u64>>();
+
+                round.purge();
+
+                hashes
+            })
+            .flatten()
+            .collect::<Vec<u64>>();
+
+        self.events.purge(events_to_remove.clone());
+
+        self.ancestor_cache = Self::purge_cache(&events_to_remove, &self.ancestor_cache);
+        self.first_decendant_cache =
+            Self::purge_cache(&events_to_remove, &self.first_decendant_cache);
+        self.self_ancestor_cache = Self::purge_cache(&events_to_remove, &self.self_ancestor_cache);
+        self.ss_cache = Self::purge_cache(&events_to_remove, &self.ss_cache);
+        self.ss_path_cache = Self::purge_cache(&events_to_remove, &self.ss_path_cache);
+    }
+
+    fn purge_cache<T: Clone>(
+        hash: &Vec<u64>,
+        cache: &HashMap<(EventHash, EventHash), T>,
+    ) -> HashMap<(EventHash, EventHash), T> {
+        cache
+            .iter()
+            .filter(|((h1, h2), _)| hash.contains(h1) || hash.contains(h2))
+            .map(|(h, b)| (h.clone(), b.clone()))
+            .collect()
     }
 }

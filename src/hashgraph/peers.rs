@@ -38,8 +38,8 @@ impl Peers {
         info!(
             "New peer -> {} Self: {} Nb: {}",
             peer.clone(),
+            peer.id == self.self_id,
             self.peers.len(),
-            peer.id == self.self_id
         );
 
         self.super_majority = (2 * self.peers.len() / 3 + 1) as u64;

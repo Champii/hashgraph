@@ -20,12 +20,17 @@ service! {
     }
 
     fn pull(&mut self, known: super::HashMap<super::EventCreator, u64>) -> super::EventsDiff {
-      trace!("Got events to pull {:?}", known);
+      trace!("RPC: Got events to pull {:?}", known);
 
       self.hg.read().unwrap().events.events_diff(known, 8)
     }
 
     fn push(&mut self, events: super::EventsDiff) -> bool {
+      trace!(
+          "RPC: Got events to push {:?}",
+          events.diff.iter().fold(0, |c, v| c + v.1.len())
+      );
+
       let peers = self.hg.read().unwrap().get_last_decided_peers();
 
       let self_id = peers.clone().self_id;
@@ -38,7 +43,6 @@ service! {
         0
       };
 
-      trace!("Got events to push {:?}", events);
 
       self.hg.write().unwrap().merge_events(self_id, id, events);
 

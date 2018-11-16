@@ -44,6 +44,7 @@ pub struct Round {
     pub witnesses: Vec<EventHash>,
     pub peers: Peers,
     pub decided: bool,
+    pub purged: bool,
 }
 
 impl Round {
@@ -54,6 +55,7 @@ impl Round {
             witnesses: vec![],
             peers: Peers::new(),
             decided: false,
+            purged: false,
         }
     }
 
@@ -67,5 +69,14 @@ impl Round {
         }
 
         self.events.insert(e.hash, round_event.clone());
+    }
+
+    pub fn purge(&mut self) {
+        self.events = HashMap::new();
+        self.witnesses = vec![];
+        self.peers = Peers::new();
+        self.purged = true;
+
+        trace!("Round: Purged {}", self.id);
     }
 }
