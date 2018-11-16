@@ -15,7 +15,7 @@ pub struct Hashgraph {
     // pub peers: Arc<RwLock<Peers>>,
     pub events: Events,
     // todo: remove this unecessary arc mutex
-    pub rounds: Arc<RwLock<BTreeMap<u64, Round>>>, // round_id -> round
+    pub rounds: BTreeMap<u64, Round>, // round_id -> round
     pub tx_out: Arc<Mutex<Sender<Vec<u8>>>>,
     pub transactions: Vec<Vec<u8>>,
     pub internal_transactions: Vec<PeerTx>,
@@ -51,7 +51,7 @@ impl Hashgraph {
         Hashgraph {
             // peers,
             events: Events::new(),
-            rounds: Arc::new(RwLock::new(BTreeMap::new())),
+            rounds: BTreeMap::new(),
             transactions: vec![],
             internal_transactions: vec![],
             tx_out,
@@ -69,7 +69,7 @@ impl Hashgraph {
 
         first_round.peers = peers.clone();
 
-        self.rounds.write().unwrap().insert(1, first_round); // rounds start at 1
+        self.rounds.insert(1, first_round); // rounds start at 1
     }
 
     pub fn add_self_event(&mut self, tx: Vec<u8>, _peer_txs: Vec<PeerTx>) -> bool {
@@ -98,6 +98,9 @@ impl Hashgraph {
     }
 
     pub fn insert_event(&mut self, event: Event) -> bool {
+        let now = SystemTime::now();
+        defer!(trace!("Time: Insert Event: {:?}", now.elapsed().unwrap()));
+
         let mut event = event.clone();
 
         event.round = 0;
@@ -106,7 +109,7 @@ impl Hashgraph {
             return false;
         }
 
-        let round = self.get_parent_round(event.clone());
+        // let round = self.get_parent_round(event.clone());
 
         event.round = self.get_round_id(event.clone());
 
@@ -131,7 +134,7 @@ impl Hashgraph {
 
     pub fn get_last_decided_peers(&self) -> Peers {
         // error!("RETURNING LAST PEERS !!!!!!!");
-        let round = self.rounds.read().unwrap().values().last().unwrap().clone();
+        let round = self.rounds.values().last().unwrap().clone();
 
         round.peers.clone()
     }
@@ -149,12 +152,12 @@ impl Hashgraph {
             return self.get_last_decided_peers();
         }
 
-        match self.rounds.read().unwrap().get(&event.round) {
+        match self.rounds.get(&event.round) {
             Some(round) => round.peers.clone(),
-            None => match self.rounds.read().unwrap().get(&(event.round - 1)) {
-                Some(round) => round.peers.clone(),
-                None => self.get_last_decided_peers(),
-            },
+            // None => match self.rounds.get(&(event.round - 1)) {
+            //     Some(round) => round.peers.clone(),
+            None => self.get_last_decided_peers(),
+            // },
         }
     }
 
@@ -165,6 +168,7 @@ impl Hashgraph {
         other_events: EventsDiff,
     ) -> Result<EventsDiff, String> {
         let now = SystemTime::now();
+        defer!(trace!("Time: Merge Events: {:?}", now.elapsed().unwrap()));
 
         let mut merged = 0;
 
@@ -218,8 +222,7 @@ impl Hashgraph {
 
         events_diff.sender_id = self_id;
 
-        debug!("Merge Event count: {}", merged);
-        debug!("Merge Time: {:?}", now.elapsed());
+        trace!("Merged Event count: {}", merged);
 
         Ok(events_diff)
     }
@@ -352,6 +355,7 @@ impl Hashgraph {
 
         res
     }
+
     fn _strongly_see_with_path(
         &mut self,
         e: Event,
@@ -405,11 +409,9 @@ impl Hashgraph {
 
         let mut ss_count = 0;
 
-        for (_, witness) in last_round.witnesses.iter() {
-            let got_witness = self
-                .events
-                .get_event(&witness.read().unwrap().hash)
-                .unwrap();
+        for witness_hash in last_round.witnesses.iter() {
+            let witness_round_event = last_round.events.get(&witness_hash).unwrap();
+            let got_witness = self.events.get_event(&witness_round_event.hash).unwrap();
 
             if self.strongly_see(e.clone(), got_witness) {
                 ss_count += 1;
@@ -451,8 +453,6 @@ impl Hashgraph {
         let is_witness = self.is_witness(e.clone());
 
         self.rounds
-            .write()
-            .unwrap()
             .entry(e.round)
             .and_modify(|round| {
                 round.insert(e.clone(), is_witness);
@@ -471,19 +471,19 @@ impl Hashgraph {
     }
 
     pub fn get_last_populated_round(&self, event: &Event) -> Round {
-        for round in self.rounds.read().unwrap().values().rev() {
+        for round in self.rounds.values().rev() {
             if round.clone().peers.get_by_id(event.creator).is_some() {
                 return round.clone();
             }
         }
-        // for round in self.rounds.read().unwrap().values().rev() {
+        // for round in self.rounds.values().rev() {
         //     if round.events.len() > 0 {
         //         return round.clone();
         //     }
         // }
 
         error!("NO ROUND FOUND");
-        self.rounds.read().unwrap().values().last().unwrap().clone()
+        self.rounds.values().last().unwrap().clone()
     }
 
     pub fn get_parent_round_id(&self, e: Event) -> u64 {
@@ -497,84 +497,82 @@ impl Hashgraph {
     pub fn get_parent_round(&self, e: Event) -> Round {
         let self_parent = self.events.get_event(&e.self_parent);
 
-        // let mut round = self.rounds.read().unwrap().iter().last().unwrap().0.clone();
+        // let mut round = self.rounds.iter().last().unwrap().0.clone();
         let mut round = self.get_last_populated_round(&e).id;
 
         if self_parent.is_some() {
             round = self_parent.unwrap().round
         }
 
-        self.rounds.read().unwrap().get(&round).unwrap().clone()
+        self.rounds.get(&round).unwrap().clone()
     }
 
     pub fn process_fame(&mut self, e: Event) {
         // warn!("PROCESS FAME {} {}", e.round, self.is_witness(e.clone()));
-        let first_round_nb = self.rounds.read().unwrap().keys().next().unwrap().clone();
+        let first_round_nb = self.rounds.keys().next().unwrap().clone();
 
         if e.round == first_round_nb || !self.is_witness(e.clone()) {
             return;
         }
 
-        let round = self.rounds.read().unwrap().get(&e.round).unwrap().clone();
-        let round_event = round.events.get(&e.hash).unwrap().clone();
+        let now = SystemTime::now();
 
-        let prev_round = self
+        let prev_round = self.rounds.get(&(e.round - 1)).unwrap().clone();
+        // let mut round = self.rounds.get_mut(&e.round).unwrap();
+        let mut round_event = self
             .rounds
-            .read()
+            .get(&e.round)
             .unwrap()
-            .get(&(e.round - 1))
+            .events
+            .get(&e.hash)
             .unwrap()
             .clone();
 
         // count votes
         let mut vote_results = HashMap::new();
 
-        for (_, witness) in prev_round.witnesses.iter() {
-            let wit_hash = witness.read().unwrap().hash;
+        for witness_hash in prev_round.witnesses.iter() {
+            let witness_round_event = prev_round.events.get(witness_hash).unwrap();
+            let wit_hash = witness_round_event.hash;
             let got_witness = self.events.get_event(&wit_hash).unwrap();
 
             // vote
             round_event
-                .write()
-                .unwrap()
                 .votes
                 .insert(wit_hash, self.see(e.clone(), got_witness.clone()));
 
             // collect votes
             if self.strongly_see(e.clone(), got_witness) {
-                for (hash, vote) in witness.read().unwrap().clone().votes {
+                for (hash, vote) in witness_round_event.clone().votes {
                     if vote {
-                        (*vote_results.entry(hash).or_insert(0)) += 1;
+                        *vote_results.entry(hash).or_insert(0) += 1;
                     }
                 }
             }
         }
 
+        self.rounds
+            .get_mut(&e.round)
+            .unwrap()
+            .events
+            .insert(e.hash, round_event.clone());
+
         for (hash, votes) in vote_results.iter() {
             // let super_majority = self.get_decided_peers(&e).super_majority;
 
-            let mut rounds = self.rounds.write().unwrap();
-            let mut prev_prev_round = rounds.get_mut(&(e.round - 2)).unwrap();
+            // let mut rounds = self.rounds.write().unwrap();
+            let mut prev_prev_round = self.rounds.get_mut(&(e.round - 2)).unwrap();
             let super_majority = prev_prev_round.peers.super_majority;
 
-            if votes.clone() >= super_majority {
-                prev_prev_round
-                    .events
-                    .get(hash)
-                    .unwrap()
-                    .write()
-                    .unwrap()
-                    .famous = FamousType::True;
+            let is_famous = if votes.clone() >= super_majority {
+                FamousType::True
             } else {
-                prev_prev_round
-                    .events
-                    .get(hash)
-                    .unwrap()
-                    .write()
-                    .unwrap()
-                    .famous = FamousType::False;
-            }
+                FamousType::False
+            };
+            prev_prev_round.events.get_mut(hash).unwrap().famous = is_famous.clone();
         }
+
+        trace!("Time: Process Fame: {:?}", now.elapsed().unwrap());
 
         self.decide_round_received();
     }
@@ -588,23 +586,25 @@ impl Hashgraph {
         for (_, undecided) in self.events.undecided.clone() {
             // start at r+1
 
-            let last_round = self.rounds.read().unwrap().iter().last().unwrap().0.clone();
+            let last_round = self.rounds.iter().last().unwrap().0.clone();
             // warn!("UNDECIDED ROUND {}", undecided.round);
 
             for i in undecided.round + 1..last_round {
-                let round = &self.rounds.read().unwrap().get(&i).unwrap().clone();
+                let round = &self.rounds.get(&i).unwrap().clone();
 
-                let witness_iter = round.witnesses.iter();
+                let witness_iter = round
+                    .witnesses
+                    .iter()
+                    .map(|hash| (hash, round.events.get(hash).unwrap()));
 
                 if witness_iter
                     .clone()
-                    .any(|(_, e)| e.read().unwrap().famous == FamousType::Undefined)
+                    .any(|(_, e)| e.famous == FamousType::Undefined)
                 {
                     break;
                 }
 
-                let famous =
-                    witness_iter.filter(|(_, e)| e.read().unwrap().famous == FamousType::True);
+                let famous = witness_iter.filter(|(_, e)| e.famous == FamousType::True);
 
                 if famous.clone().count() == 0 {
                     break;
@@ -623,15 +623,13 @@ impl Hashgraph {
                 }
 
                 if decided {
-                    let mut rounds = &mut self.rounds.write().unwrap();
+                    // let mut rounds = &mut self.rounds.write().unwrap();
 
-                    rounds
-                        .get(&undecided.round)
+                    self.rounds
+                        .get_mut(&undecided.round)
                         .unwrap()
                         .events
-                        .get(&undecided.hash)
-                        .unwrap()
-                        .write()
+                        .get_mut(&undecided.hash)
                         .unwrap()
                         .received = i as u64;
 
@@ -649,9 +647,13 @@ impl Hashgraph {
             self.events.undecided.remove(&hash);
         }
 
-        warn!("UNDECIDED {}", self.events.undecided.len());
+        trace!("Decide Round: Decided events {}", decided_events.len());
+        trace!(
+            "Decide Round: Undecided events {}",
+            self.events.undecided.len()
+        );
 
-        warn!("DECIDE ROUND TIME {:?}", now.elapsed());
+        trace!("Time: Decide Round: {:?}", now.elapsed().unwrap());
         // warn!("DECIDED {}", decided_events.len());
 
         if decided_events.len() > 0 {
@@ -660,47 +662,37 @@ impl Hashgraph {
     }
 
     pub fn consensus_order(&mut self, decided_events: Vec<EventHash>) {
+        let now = SystemTime::now();
+
         let mut received = decided_events
             .iter()
             .map(|hash| {
                 let event = self.events.get_event(&hash).unwrap();
-                let round_borrowed = self
-                    .rounds
-                    .read()
-                    .unwrap()
-                    .get(&event.round)
-                    .unwrap()
-                    .clone();
+                let round_borrowed = self.rounds.get(&event.round).unwrap().clone();
 
                 let round_event = round_borrowed.events.get(&hash).unwrap();
-                let round_received = self
-                    .rounds
-                    .read()
-                    .unwrap()
-                    .get(&round_event.read().unwrap().received)
-                    .unwrap()
-                    .clone();
+                let round_received = self.rounds.get(&round_event.received).unwrap().clone();
 
                 (event, round_received, round_event.clone())
             })
-            .collect::<Vec<(Event, Round, Arc<RwLock<RoundEvent>>)>>();
+            .collect::<Vec<(Event, Round, RoundEvent)>>();
 
-        received.sort_by(|(_, _, re1), (_, _, re2)| {
-            let e1 = re1.read().unwrap();
-            let e2 = re2.read().unwrap();
-
-            re1.read()
-                .unwrap()
-                .received
-                .cmp(&re2.read().unwrap().received)
-        });
+        received.sort_by(|(_, _, re1), (_, _, re2)| re1.received.cmp(&re2.received));
 
         let mut timestamped = received
             .iter()
             .map(|(e, r, re)| {
                 let t = self.get_consensus_timestamp(e.clone(), r);
 
-                re.write().unwrap().timestamp = t;
+                self.rounds
+                    .get_mut(&e.round)
+                    .unwrap()
+                    .events
+                    .get_mut(&re.hash)
+                    .unwrap()
+                    .timestamp = t;
+
+                // re.write().unwrap().timestamp = t;
 
                 // self.rounds.write().unwrap().
 
@@ -738,6 +730,10 @@ impl Hashgraph {
             })
             .collect::<Vec<(Vec<Vec<u8>>, Vec<PeerTx>, Round)>>();
 
+        trace!("Time: Consensus Order: {:?}", now.elapsed().unwrap());
+
+        let now = SystemTime::now();
+
         if txs.len() > 0 {
             for tx in txs.clone() {
                 // classic transactions
@@ -754,8 +750,7 @@ impl Hashgraph {
                     if tx.1.len() > 0 {
                         let mut round = &mut tx.2.clone();
 
-                        let last_round =
-                            self.rounds.read().unwrap().values().last().unwrap().clone();
+                        let last_round = self.rounds.values().last().unwrap().clone();
                         let last_round_id = last_round.id;
 
                         for i in last_round_id + 1..=round.id + 3 {
@@ -763,12 +758,11 @@ impl Hashgraph {
 
                             r.peers = last_round.peers.clone();
 
-                            self.rounds.write().unwrap().insert(i, r);
+                            self.rounds.insert(i, r);
                         }
 
-                        let mut rounds = self.rounds.write().unwrap();
-
-                        let rounds_to_modify = rounds
+                        let rounds_to_modify = self
+                            .rounds
                             .iter()
                             .skip_while(|(id, _)| id < &&(round.id + 3))
                             .map(|tuple| tuple.0.clone())
@@ -778,7 +772,11 @@ impl Hashgraph {
                         for item in tx.1.clone() {
                             if item.tx_type == PeerTxType::Join {
                                 for round in rounds_to_modify.clone() {
-                                    rounds.get_mut(&round).unwrap().peers.add(item.peer.clone());
+                                    self.rounds
+                                        .get_mut(&round)
+                                        .unwrap()
+                                        .peers
+                                        .add(item.peer.clone());
                                 }
                             }
                             // TODO: remove peer
@@ -790,18 +788,18 @@ impl Hashgraph {
                 self.internal_transactions.extend(tx.1);
             }
         }
+
+        trace!("Time: Tx Ouptut: {:?}", now.elapsed().unwrap());
     }
 
     pub fn get_consensus_timestamp(&mut self, event: Event, round: &Round) -> u64 {
         let mut timestamps = round
             .witnesses
             .iter()
-            .filter(|(_, e)| e.read().unwrap().famous == FamousType::True)
+            .map(|hash| (hash, round.events.get(hash).unwrap()))
+            .filter(|(_, e)| e.famous == FamousType::True)
             .map(|(_, witness)| {
-                let witness_event = self
-                    .events
-                    .get_event(&witness.read().unwrap().hash)
-                    .unwrap();
+                let witness_event = self.events.get_event(&witness.hash).unwrap();
 
                 self.get_first_decendant(event.clone(), witness_event)
                     .unwrap()
@@ -893,18 +891,21 @@ impl Hashgraph {
     }
 
     pub fn get_last_frame(&self, peer_id: u64) -> Frame {
+        let now = SystemTime::now();
+        defer!(trace!("Time: Get Last Frame: {:?}", now.elapsed().unwrap()));
+
         if self.get_last_decided_peers().get_by_id(peer_id).is_none() {
             return Frame::new();
         }
 
-        let rounds_len = self.rounds.read().unwrap().iter().last().unwrap().0.clone();
+        let rounds_len = self.rounds.iter().last().unwrap().0.clone();
 
         let bound = if rounds_len <= 5 { 1 } else { rounds_len - 4 };
 
         let mut frame = Frame::new();
 
         for i in bound..=rounds_len {
-            let round = self.rounds.read().unwrap().get(&i).unwrap().clone();
+            let round = self.rounds.get(&i).unwrap().clone();
 
             let mut creator_events = HashMap::new();
 

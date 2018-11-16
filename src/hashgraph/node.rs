@@ -78,10 +78,7 @@ impl Node {
 
             local_self.peers.write().unwrap().self_id = self_peer.id;
 
-            let hg = Arc::new(RwLock::new(Hashgraph::new(
-                // local_self.peers.clone(),
-                Arc::new(Mutex::new(tx_out)),
-            )));
+            let hg = Arc::new(RwLock::new(Hashgraph::new(Arc::new(Mutex::new(tx_out)))));
 
             let hg2 = hg.clone();
             thread::spawn(move || loop {
@@ -97,34 +94,10 @@ impl Node {
             let hg3 = hg.clone();
             thread::spawn(move || loop {
                 let tx = peer_in_receiver.recv();
-                // let mut is_bootstrap = false;
-
-                // {
-                //     let mut hg = hg3.write().unwrap();
-
-                //     let mut last = hg.rounds[hg.rounds.len() - 1].write().unwrap();
-
-                //     if last.peers.len() == 1 {
-                //         warn!("BOOTSTRAP ADD");
-                //         is_bootstrap = true;
-
-                //         last.peers.add(tx.clone().unwrap().peer);
-                //     }
-                // }
 
                 hg3.write()
                     .unwrap()
                     .add_self_event(vec![], vec![tx.unwrap()]);
-
-                // if is_bootstrap {
-                //     // force consensus
-                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
-                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
-                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
-                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
-                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
-                //     hg3.write().unwrap().add_self_event(vec![], vec![]);
-                // }
             });
 
             if let Some(addr) = local_self.config.connect_addr {
@@ -175,7 +148,7 @@ impl Node {
 
         client.ask_join(self_peer.clone()).unwrap().unwrap();
 
-        info!("Syncing");
+        info!("Syncing...");
 
         let mut frame;
 
@@ -200,93 +173,48 @@ impl Node {
                 break;
             }
         }
-        warn!("SYNC {:?}", frame);
 
-        // let frame = frame.unwrap().unwrap();
+        trace!("Sync: rounds {}", frame.events.len());
+
+        let now = SystemTime::now();
 
         let mut hg = hg.write().unwrap();
 
+        let mut nb_events = 0;
+        let mut nb_peers = 0;
+
         for (round_id, round_events) in frame.clone().events {
-            // let mut events = events.clone();
+            hg.rounds.entry(round_id).or_insert_with(|| {
+                let mut round = Round::new(round_id);
 
-            // let mut events: Vec<Event> = events.values().cloned().collect();
+                round.peers = round_events.0.clone();
 
-            // events.sort_by(|e1, e2| e1.id.cmp(&e2.id));
+                round.peers.self_id = self_peer.id;
 
-            hg.rounds
-                .write()
-                .unwrap()
-                .entry(round_id)
-                .or_insert_with(|| {
-                    let mut round = Round::new(round_id);
+                nb_peers = round.peers.len();
 
-                    round.peers = round_events.0.clone();
-
-                    round.peers.self_id = self_peer.id;
-
-                    round
-                });
+                round
+            });
 
             for (_, events) in round_events.1 {
                 for (_, event) in events {
                     hg.insert_event(event.clone());
+
+                    nb_events += 1;
                 }
             }
         }
 
-        // trace!("Events from pull {:?}", events.clone());
-
-        // let events_diff = hg.write().unwrap().merge_events(0, 0, events.clone());
-
-        // if !events.has_more {
-        //     break;
-        // }
-        // }
-
-        // loop {
-        //     let known = hg.read().unwrap().events.known_events();
-
-        //     let pull_res = client.pull(known);
-
-        //     if let Err(err) = pull_res {
-        //         error!("{:?}", err);
-
-        //         client.close();
-
-        //         continue;
-        //     }
-
-        //     let events = pull_res.unwrap().unwrap();
-
-        //     trace!("Events from pull {:?}", events.clone());
-
-        //     let events_diff = hg.write().unwrap().merge_events(0, 0, events.clone());
-
-        //     if !events.has_more {
-        //         break;
-        //     }
-        // }
+        defer!(trace!("Time: Sync: {:?}", now.elapsed()));
 
         client.close();
 
-        info!("Synced");
-
-        let other_last = hg
-            .events
-            .get_last_event_of(
-                hg.get_last_decided_peers()
-                    .get_by_socket_addr(addr)
-                    .unwrap()
-                    .id,
-            )
-            .unwrap()
-            .id;
+        info!("Synced: Events {}, Peers {}", nb_events, nb_peers);
 
         hg.insert_event(Event::new(
             0,
             self_peer.id,
             0,
-            // other_last,
             0,
             vec![self_peer.id.to_string().into_bytes()],
             vec![],
@@ -321,13 +249,6 @@ impl Node {
         let mut clients: HashMap<u64, HgRpc::Client<rsrpc::TcpTransport>> = HashMap::new();
 
         loop {
-            // thread::sleep(time::Duration::from_millis(10));
-
-            // warn!(
-            //     "PEERS NB {}",
-            //     _hg.read().unwrap().get_last_decided_peers().len()
-            // );
-
             let peer = match _hg.read().unwrap().get_last_decided_peers().get_random() {
                 Some(p) => p,
                 None => {
@@ -336,6 +257,9 @@ impl Node {
                     continue;
                 }
             };
+
+            let now = SystemTime::now();
+            defer!(trace!("Time: Gossip: {:?}", now.elapsed().unwrap()));
 
             let mut client = {
                 let client = clients.get(&peer.id);
@@ -346,47 +270,30 @@ impl Node {
                     let c = HgRpc::connect_tcp(&peer.address.to_string());
 
                     if let Err(e) = c {
-                        // error!("Error connect: {}", e);
+                        debug!("Error connect: {:?} {}", peer.address, e);
                         // send leave tx
 
                         continue;
                     }
 
-                    c.unwrap()
+                    let c = c.unwrap();
+
+                    c
                 }
             };
+
+            clients.insert(peer.id, client.clone());
 
             let self_id = _hg.read().unwrap().get_last_decided_peers().self_id;
 
             let hg = _hg.clone();
 
-            // thread::spawn(move || {
             let now = SystemTime::now();
-
-            // let events_diff = {
-            //     let mut hg2 = hg.write().unwrap();
-
-            //     let known = hg2.events.known_events();
-
-            //     let pull_res = client.pull(known);
-
-            //     if let Err(err) = pull_res {
-            //         error!("{:?}", err);
-
-            //         return;
-            //     }
-
-            //     let events = pull_res.unwrap().unwrap();
-
-            //     trace!("Events from pull {:?}", events.clone());
-
-            //     hg2.merge_events(self_id, peer.id, events)
-            // };
 
             let known = hg.read().unwrap().events.known_events();
 
             let pull_res = client.pull(known);
-            // thread::spawn(move || {
+
             if let Err(err) = pull_res {
                 error!("{:?}", err);
 
@@ -399,7 +306,10 @@ impl Node {
 
             let events = pull_res.unwrap().unwrap();
 
-            trace!("Events from pull {:?}", events.clone());
+            trace!(
+                "Events from pull {:?}",
+                events.diff.iter().fold(0, |c, v| c + v.1.len())
+            );
 
             let events_diff = hg.write().unwrap().merge_events(self_id, peer.id, events);
 
@@ -407,15 +317,14 @@ impl Node {
                 continue;
             }
 
-            trace!("Events to push {:?}", events_diff.clone());
+            let events_diff = events_diff.unwrap();
 
-            client.push(events_diff.unwrap());
+            trace!(
+                "Events to push {:?}",
+                events_diff.diff.iter().fold(0, |c, v| c + v.1.len())
+            );
 
-            debug!("Gossip Time: {:?}", now.elapsed());
-
-            // client.close();
-            // });
-            // });
+            client.push(events_diff);
         }
     }
 }

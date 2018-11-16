@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -38,9 +39,9 @@ impl RoundEvent {
 pub struct Round {
     pub id: u64,
     // todo: remove this unecessary arc mutex
-    pub events: HashMap<EventHash, Arc<RwLock<RoundEvent>>>,
+    pub events: HashMap<EventHash, RoundEvent>,
     // todo: remove this unecessary arc mutex
-    pub witnesses: HashMap<EventHash, Arc<RwLock<RoundEvent>>>,
+    pub witnesses: Vec<EventHash>,
     pub peers: Peers,
     pub decided: bool,
 }
@@ -50,19 +51,19 @@ impl Round {
         Round {
             id,
             events: HashMap::new(),
-            witnesses: HashMap::new(),
+            witnesses: vec![],
             peers: Peers::new(),
             decided: false,
         }
     }
 
     pub fn insert(&mut self, e: Event, is_witness: bool) {
-        let round_event = Arc::new(RwLock::new(RoundEvent::from_event(e.clone())));
+        let mut round_event = RoundEvent::from_event(e.clone());
 
         if is_witness {
-            (*round_event.write().unwrap()).witness = true;
+            round_event.witness = true;
 
-            self.witnesses.insert(e.hash, round_event.clone());
+            self.witnesses.push(round_event.hash);
         }
 
         self.events.insert(e.hash, round_event.clone());

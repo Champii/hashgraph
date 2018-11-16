@@ -8,6 +8,8 @@ extern crate rsrpc;
 pub extern crate lazy_static;
 #[macro_use]
 extern crate log;
+#[macro_use(defer)]
+extern crate scopeguard;
 
 extern crate bincode;
 extern crate env_logger;

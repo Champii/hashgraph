@@ -33,11 +33,14 @@ impl Peers {
             return;
         }
 
-        if peer.id != self.self_id {
-            info!("New peer -> {}", peer.clone());
-        }
+        self.peers.insert(peer.id, peer.clone());
 
-        self.peers.insert(peer.id, peer);
+        info!(
+            "New peer -> {} Self: {} Nb: {}",
+            peer.clone(),
+            self.peers.len(),
+            peer.id == self.self_id
+        );
 
         self.super_majority = (2 * self.peers.len() / 3 + 1) as u64;
     }

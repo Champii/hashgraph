@@ -462,7 +462,7 @@ mod hashgraph_tests {
     		|   | \ |
     		|   |   c8
     		|   | / |
-    		|   b8  |
+    		|   b8  |get_mutget_mut
     		| / |   |
     		a8  |   c7
     		| \ | / |
@@ -575,14 +575,12 @@ mod hashgraph_tests {
         };
 
         let assert_famous = |r: u64, hash: &str, res: FamousType| {
-            let round = hg.rounds.read().unwrap().get(&r).unwrap().clone();
+            let round = hg.rounds.get(&r).unwrap().clone();
 
             assert_eq!(
                 round
-                    .witnesses
+                    .events
                     .get(&indexes.get(hash).unwrap().clone().hash)
-                    .unwrap()
-                    .read()
                     .unwrap()
                     .famous,
                 res
@@ -737,13 +735,11 @@ mod hashgraph_tests {
         for (round, &count) in decided.iter().enumerate() {
             assert_eq!(
                 hg.rounds
-                    .read()
-                    .unwrap()
                     .get(&(round as u64 + 1))
                     .unwrap()
                     .events
                     .iter()
-                    .filter(|(_, val)| val.read().unwrap().received > 0)
+                    .filter(|(_, val)| val.received > 0)
                     .count(),
                 count,
             );
@@ -886,21 +882,12 @@ mod hashgraph_tests {
             );
         }
 
-        assert_eq!(hg.rounds.read().unwrap().len(), 4);
+        assert_eq!(hg.rounds.len(), 4);
 
         assert_eq!(hg.get_last_decided_peers().len(), 2);
 
-        for i in 1..hg.rounds.read().unwrap().len() {
-            assert_eq!(
-                hg.rounds
-                    .read()
-                    .unwrap()
-                    .get(&(i as u64))
-                    .unwrap()
-                    .peers
-                    .len(),
-                2
-            );
+        for i in 1..hg.rounds.len() {
+            assert_eq!(hg.rounds.get(&(i as u64)).unwrap().peers.len(), 2);
         }
 
         insert_events(
@@ -915,7 +902,7 @@ mod hashgraph_tests {
 
         error!("LOL {:?}", hg.rounds);
 
-        assert_eq!(hg.rounds.read().unwrap().len(), 6);
+        assert_eq!(hg.rounds.len(), 6);
 
         // assert_eq!(hg.rounds.len(), 5);
 
@@ -982,7 +969,7 @@ mod hashgraph_tests {
             true
         );
 
-        assert_eq!(hg.rounds.read().unwrap().len(), 6);
+        assert_eq!(hg.rounds.len(), 6);
 
         let rounds: Vec<(&str, u64)> = vec![("b5", 5), ("a5", 6)];
 

@@ -58,7 +58,7 @@ impl Events {
                 res
             });
 
-        trace!("INSERT EVENT {:?}", event);
+        trace!("Insert Event {:?}", event);
     }
 
     pub fn check_event(&self, event: &Event) -> bool {
@@ -72,7 +72,6 @@ impl Events {
 
         if let Some(events) = creator_events {
             if events.len() > 0 && events.values().last().unwrap().id + 1 != event.id {
-                error!("HERE {:?}", events);
                 error!("Insert event: Non-sequential event: {:?}", event);
 
                 return false;
@@ -98,23 +97,6 @@ impl Events {
             }
         }
 
-        // if event.other_parent != 0 {
-        //     match self.by_hash.get(&event.other_parent) {
-        //         Some(e) => {
-        //             return true;
-        //         }
-        //         None => {
-        //             if let Some(arr) = creator_events {
-        //                 if arr.len() > 0 {
-        //                     error!("Insert event: Bad event other-parent is nil {:?}", event);
-
-        //                     return false;
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
-
         true
     }
 
@@ -125,7 +107,7 @@ impl Events {
             res.insert(peer_id.clone(), events.values().last().unwrap().id);
         }
 
-        trace!("KNOWN {:?}", res);
+        trace!("Known {:?}", res);
 
         res
     }
@@ -136,7 +118,7 @@ impl Events {
         // let mut res_known = HashMap::new();
         let mut has_more = false;
 
-        trace!("OTHER KNOWN {:?}", other_known);
+        trace!("EventsDiff: Other Known {:?}", other_known);
 
         for (peer_id, last_known) in &known {
             match other_known.get(peer_id) {
@@ -185,7 +167,7 @@ impl Events {
             }
         }
 
-        trace!("DIFF {:?}", res_events);
+        trace!("EventsDiff: Diff {:?}", res_events);
 
         EventsDiff {
             sender_id: 0,
